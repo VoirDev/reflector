@@ -1,0 +1,30 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="reflector build" type="GradleRunConfiguration" factoryName="Gradle">
+    <log_file alias="build log" path="$PROJECT_DIR$/build/last-build.log" />
+    <option name="SAVE_OUTPUT_TO_FILE" value="true" />
+    <option name="OUTPUT_FILE_PATH" value="$PROJECT_DIR$/build/last-build.log" />
+    <ExternalSystemSettings>
+      <option name="env">
+        <map />
+      </option>
+      <option name="executionName" />
+      <option name="externalProjectPath" value="$PROJECT_DIR$" />
+      <option name="externalSystemIdString" value="GRADLE" />
+      <option name="scriptParameters" value="--console=plain --stacktrace" />
+      <option name="taskDescriptions">
+        <list />
+      </option>
+      <option name="taskNames">
+        <list>
+          <option value=":client-sdk:build" />
+        </list>
+      </option>
+      <option name="vmOptions" />
+    </ExternalSystemSettings>
+    <ExternalSystemDebugServerProcess>false</ExternalSystemDebugServerProcess>
+    <ExternalSystemReattachDebugProcess>true</ExternalSystemReattachDebugProcess>
+    <DebugAllEnabled>false</DebugAllEnabled>
+    <RunAsTest>false</RunAsTest>
+    <method v="2" />
+  </configuration>
+</component>

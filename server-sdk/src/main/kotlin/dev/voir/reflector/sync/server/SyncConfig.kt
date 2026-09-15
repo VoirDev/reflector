@@ -17,12 +17,17 @@ import kotlin.time.Duration.Companion.days
  *   so keeping history longer buys nothing and keeping it shorter loses changes.
  * @property maxOperationsPerGroup Largest number of operations accepted in one group.
  * @property maxChangesPageSize Largest page the module serves when reading the log or a snapshot.
+ * @property blobs Configuration of files, or `null` when this deployment serves none. Its absence is
+ *   published to clients rather than kept private: an application configured to synchronise files
+ *   against a server that has no storage behind it has a misconfiguration worth learning about at
+ *   start-up instead of on the first photograph a user attaches.
  */
 public data class SyncConfig(
     public val collections: Map<CollectionId, CollectionSpec>,
     public val retention: Duration = DEFAULT_RETENTION,
     public val maxOperationsPerGroup: Int = DEFAULT_MAX_OPERATIONS_PER_GROUP,
     public val maxChangesPageSize: Int = DEFAULT_MAX_PAGE_SIZE,
+    public val blobs: BlobConfig? = null,
 ) {
     init {
         require(collections.isNotEmpty()) { "at least one collection has to be registered" }
@@ -63,6 +68,7 @@ public data class SyncConfig(
  * @param retention How long history is kept.
  * @param maxOperationsPerGroup Largest number of operations in one group.
  * @param maxChangesPageSize Largest page served.
+ * @param blobs Configuration of files, or `null` to serve none.
  * @return Configuration keyed by collection identifier.
  */
 public fun syncConfig(
@@ -70,10 +76,12 @@ public fun syncConfig(
     retention: Duration = SyncConfig.DEFAULT_RETENTION,
     maxOperationsPerGroup: Int = SyncConfig.DEFAULT_MAX_OPERATIONS_PER_GROUP,
     maxChangesPageSize: Int = SyncConfig.DEFAULT_MAX_PAGE_SIZE,
+    blobs: BlobConfig? = null,
 ): SyncConfig =
     SyncConfig(
         collections = collections.associateBy { it.id },
         retention = retention,
         maxOperationsPerGroup = maxOperationsPerGroup,
         maxChangesPageSize = maxChangesPageSize,
+        blobs = blobs,
     )

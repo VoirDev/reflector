@@ -4,8 +4,10 @@ import dev.voir.reflector.sync.core.adapter.CollectionAdapter
 import dev.voir.reflector.sync.core.adapter.RemoteOp
 import dev.voir.reflector.sync.core.adapter.SchemaFingerprint
 import dev.voir.reflector.sync.core.adapter.SyncRejection
+import dev.voir.reflector.sync.core.blob.BlobRef
 import dev.voir.reflector.sync.core.conflict.Conflict
 import dev.voir.reflector.sync.core.conflict.Resolution
+import dev.voir.reflector.sync.protocol.BlobId
 import dev.voir.reflector.sync.protocol.EntityId
 import dev.voir.reflector.sync.protocol.EntityType
 import dev.voir.reflector.sync.protocol.SyncProtocolJson
@@ -30,6 +32,38 @@ class LedgerAdapter(
     // which is the same thing requestResync() does, minus having to remember to call it.
     override val schema: SchemaFingerprint = SchemaFingerprint("ledger-v1")
 
+    /**
+     * Says which files a document points at, which is the whole of this application's file support.
+     *
+     * The binding is the editorial decision, and here it is the default one. A wallet with a name
+     * and a currency is a useful wallet: holding its creation back until the photograph had finished
+     * uploading would mean a user who attached a large picture on a poor connection cannot see their
+     * own wallet on their other device. The photograph arrives when it arrives.
+     *
+     * The fetch policy is left unstated for the same kind of reason, which leaves it to whatever
+     * `ledgerSync` was given: a wallet photograph is small and is drawn in a list, so an application
+     * showing that list wants them all. A reference to something large — the original of a scan, a
+     * video — would say [dev.voir.reflector.sync.core.blob.BlobFetch.ON_DEMAND] here and be fetched
+     * when a screen opens it.
+     */
+    override fun blobs(
+        entityType: EntityType,
+        id: EntityId,
+        document: JsonObject,
+    ): Set<BlobRef> =
+        when (entityType) {
+            WALLET -> {
+                decode(WalletDocument.serializer(), document)
+                    .photoBlobId
+                    ?.let { setOf(BlobRef(BlobId(it))) }
+                    .orEmpty()
+            }
+
+            else -> {
+                emptySet()
+            }
+        }
+
     override suspend fun snapshot(
         entityType: EntityType,
         id: EntityId,
@@ -37,7 +71,10 @@ class LedgerAdapter(
         when (entityType) {
             WALLET -> {
                 dao.wallet(id.value)?.let { wallet ->
-                    encode(WalletDocument.serializer(), WalletDocument(wallet.title, wallet.currency))
+                    encode(
+                        WalletDocument.serializer(),
+                        WalletDocument(wallet.title, wallet.currency, wallet.photoBlobId),
+                    )
                 }
             }
 
@@ -92,7 +129,7 @@ class LedgerAdapter(
         when (op.entityType) {
             WALLET -> {
                 val document = decode(WalletDocument.serializer(), op.data)
-                dao.upsertWallet(Wallet(op.id.value, document.title, document.currency))
+                dao.upsertWallet(Wallet(op.id.value, document.title, document.currency, document.photoBlobId))
             }
 
             TRANSACTION -> {

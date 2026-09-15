@@ -1,9 +1,11 @@
 package dev.voir.reflector.sync.core
 
+import dev.voir.reflector.sync.core.blob.BlobSyncState
 import dev.voir.reflector.sync.core.conflict.Conflict
 import dev.voir.reflector.sync.core.conflict.ConflictId
 import dev.voir.reflector.sync.core.conflict.Resolution
 import dev.voir.reflector.sync.core.diagnostics.CollectionDiagnostics
+import dev.voir.reflector.sync.protocol.BlobId
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
 
@@ -25,6 +27,71 @@ public interface CollectionHandle {
      * without ever reaching this flow.
      */
     public val conflicts: Flow<List<Conflict>>
+
+    /**
+     * Publishes the progress of one file.
+     *
+     * What a photograph in a list binds to, and per file rather than as a list of every file in the
+     * collection because the screen drawing one already knows which identifier it is drawing.
+     *
+     * Two of the states it reports are not errors and have to be drawn as ordinary:
+     * [dev.voir.reflector.sync.core.blob.BlobTransferState.REMOTE] and
+     * [dev.voir.reflector.sync.core.blob.BlobTransferState.DOWNLOADING] are what an attachment looks
+     * like on a device whose record arrived ahead of its bytes, which is the ordinary result of
+     * [dev.voir.reflector.sync.core.blob.BlobBinding.DEFERRED].
+     *
+     * @param id File to observe.
+     * @return Progress of the file, or `null` while the library knows nothing about it — which is
+     *   the state before any document has been seen to name it, and after it has been let go of.
+     */
+    public fun blob(id: BlobId): Flow<BlobSyncState?>
+
+    /**
+     * Asks for a file's bytes to be brought to this device.
+     *
+     * What a screen calls when it opens a record whose file was left behind under
+     * [dev.voir.reflector.sync.core.blob.BlobFetch.ON_DEMAND]. It records the wish and returns; the
+     * transfer is the worker's, and its progress is read through [blob]. The wish is durable, so a
+     * download interrupted by the process dying resumes rather than waiting to be asked again, and
+     * the file stays on the device afterwards until [evict] gives it up — which is why opening the
+     * same record a second time shows the file at once.
+     *
+     * Idempotent, and safe to call on every screen that draws the file. Calling it for a file whose
+     * bytes are already here marks it wanted and does nothing else. Calling it for a file the
+     * library has given up on — [dev.voir.reflector.sync.core.blob.BlobTransferState.UNAVAILABLE]
+     * after a download that kept failing — starts again from zero attempts, which is what makes
+     * this the call behind a retry button. What it does not do is shorten a backoff that is still
+     * running: a screen redrawing itself is not a reason to try a failing transfer sooner.
+     *
+     * A file no document of this collection references is not fetched, whoever asks. The library
+     * would have nothing to keep it for, and reconciliation would offer it straight back. A
+     * collection that synchronises no files at all — one whose engine was given no
+     * [dev.voir.reflector.sync.core.blob.BlobStore] — ignores the call, as it ignores every other
+     * blob path.
+     *
+     * @param id File to fetch.
+     */
+    public suspend fun fetch(id: BlobId)
+
+    /**
+     * Gives up a file's bytes on this device, leaving the file itself on the server.
+     *
+     * The other half of [dev.voir.reflector.sync.core.blob.BlobFetch.ON_DEMAND]: a device that
+     * fetches on demand eventually wants the space back. The application's store is told to remove
+     * the bytes and the file returns to being one the server has and this device does not, so the
+     * same record can be opened again later and fetched again.
+     *
+     * Refused, with a line in the log, for a file whose bytes are the only copy — one this device
+     * created and has not finished uploading. Discarding those would not be freeing a cache, it
+     * would be losing the user's file.
+     *
+     * A file some document references [dev.voir.reflector.sync.core.blob.BlobFetch.EAGER]ly comes
+     * straight back: the declaration says this device keeps it, so the next reconciliation wants it
+     * again and fetches it. Eviction is for what was fetched on demand.
+     *
+     * @param id File to give up.
+     */
+    public suspend fun evict(id: BlobId)
 
     /**
      * Runs a block of local changes as one transaction of the application's database.

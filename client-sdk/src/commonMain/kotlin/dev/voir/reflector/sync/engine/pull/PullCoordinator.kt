@@ -12,6 +12,7 @@ import dev.voir.reflector.sync.core.metrics.SyncMetrics
 import dev.voir.reflector.sync.core.metrics.emit
 import dev.voir.reflector.sync.core.transport.SyncTransport
 import dev.voir.reflector.sync.core.transport.SyncTransportFailure
+import dev.voir.reflector.sync.engine.blob.BlobReferences
 import dev.voir.reflector.sync.persistence.SyncStores
 import dev.voir.reflector.sync.persistence.SyncTransactionRunner
 import dev.voir.reflector.sync.persistence.inbox.InboxOperation
@@ -63,6 +64,7 @@ internal class PullCoordinator(
     private val log: SyncLogger,
     private val clock: Clock,
     private val newUuid: () -> Uuid,
+    private val references: BlobReferences? = null,
 ) {
     /**
      * Reads everything the server has after the current cursor and applies it.
@@ -134,7 +136,7 @@ internal class PullCoordinator(
             if (unknown != null) {
                 log.error(
                     SyncLogEvent.UNKNOWN_OPERATION,
-                    context = { mapOf("operation" to unknown.op, "seq" to batch.seq.value.toString()) },
+                    context = { mapOf("operation" to unknown.op, "seq" to batch.seq.value) },
                 ) {
                     "the log carries an operation code this client does not understand; the collection is " +
                         "rebuilt rather than skipping past a change it cannot apply"
@@ -157,7 +159,7 @@ internal class PullCoordinator(
                 SyncLogEvent.BATCH_APPLIED,
                 context = {
                     mapOf(
-                        "seq" to batch.seq.value.toString(),
+                        "seq" to batch.seq.value,
                         "operations" to batch.ops.size.toString(),
                         "ownEcho" to (batch.originClientId == clientId).toString(),
                     )
@@ -177,7 +179,6 @@ internal class PullCoordinator(
             when {
                 // Already known: the same version cannot mean anything new.
                 record?.serverVersion == op.version -> {
-                    Unit
                 }
 
                 record == null || !record.isDirty -> {
@@ -206,13 +207,18 @@ internal class PullCoordinator(
                 }
 
                 else -> {
-                    recordConflict(op, record?.conflictId)
+                    recordConflict(op, record.conflictId)
                 }
             }
         }
 
         if (toApply.isNotEmpty()) {
             adapter.applyRemote(toApply)
+            // In the transaction that applied the documents and is about to advance the cursor. A
+            // reference written anywhere else could disagree with the document it came from after a
+            // crash, and that disagreement offers the user's file for deletion while a document
+            // still names it.
+            recordReferences(toApply, generation)
         }
         stores.collections.advanceCursor(
             scope = scope,
@@ -221,6 +227,25 @@ internal class PullCoordinator(
             appliedAt = clock.now().toEpochMilliseconds(),
         )
         stores.inbox.deleteApplied(scope, collection, batch.seq)
+    }
+
+    /**
+     * Records what the documents of a batch point at.
+     *
+     * @param ops Changes just applied to the application's tables.
+     * @param generation Bootstrap generation to stamp on the references.
+     */
+    private suspend fun recordReferences(
+        ops: List<RemoteOp>,
+        generation: Long,
+    ) {
+        val references = references ?: return
+        for (op in ops) {
+            when (op) {
+                is RemoteOp.Upsert -> references.declare(op.entityType, op.id, op.data, generation)
+                is RemoteOp.Delete -> references.clear(op.entityType, op.id)
+            }
+        }
     }
 
     /**

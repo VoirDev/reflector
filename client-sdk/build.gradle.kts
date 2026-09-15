@@ -49,6 +49,8 @@ kotlin {
             // The application declares the SDK's entities in its own `@Database` and hands the
             // `RoomDatabase` back to the engine: Room is part of the contract, not a detail.
             api(libs.room.runtime)
+            // RawSource is part of the blob ports the application implements.
+            api(libs.kotlinx.io.core)
 
             implementation(libs.ktor.client.core)
             implementation(libs.ktor.client.contentNegotiation)

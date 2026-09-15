@@ -2,6 +2,7 @@
 
 package dev.voir.reflector.sync.protocol.push
 
+import dev.voir.reflector.sync.protocol.BlobId
 import dev.voir.reflector.sync.protocol.EntityId
 import dev.voir.reflector.sync.protocol.EntityType
 import dev.voir.reflector.sync.protocol.EntityVersion
@@ -45,6 +46,18 @@ public sealed class PushOperation {
      * @property id Identifier of the affected entity.
      * @property baseVersion Version the write was based on, `null` for a newly created entity.
      * @property data Current state of the entity, serialised by the application's adapter.
+     * @property blobs Every blob this document references, as the application declared them, or
+     *   `null` from a client that does not track blobs at all.
+     *
+     *   The distinction between `null` and an empty list is contractual and the server acts on it:
+     *   `null` leaves the stored references untouched, while `[]` states that the document
+     *   references nothing and drops them. Collapsing the two would make the first push from a
+     *   client that predates files read as "everything is unreferenced now", and the collector would
+     *   then delete blobs that are still in use.
+     *
+     *   The list carries every reference whether or not its bytes have arrived yet. That is what
+     *   lets a record be published ahead of its file: the blob counts as referenced from the moment
+     *   the record is pushed, so it cannot be collected out from under a document already naming it.
      */
     @Serializable
     @SerialName("upsert")
@@ -53,6 +66,7 @@ public sealed class PushOperation {
         override val id: EntityId,
         override val baseVersion: EntityVersion?,
         public val data: JsonObject,
+        public val blobs: List<BlobId>? = null,
     ) : PushOperation()
 
     /**

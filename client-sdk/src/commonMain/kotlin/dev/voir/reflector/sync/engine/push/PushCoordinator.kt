@@ -3,6 +3,8 @@ package dev.voir.reflector.sync.engine.push
 import dev.voir.reflector.sync.core.SyncFailure
 import dev.voir.reflector.sync.core.adapter.CollectionAdapter
 import dev.voir.reflector.sync.core.adapter.SyncRejection
+import dev.voir.reflector.sync.core.blob.BlobBinding
+import dev.voir.reflector.sync.core.blob.BlobTransferState
 import dev.voir.reflector.sync.core.conflict.ConflictId
 import dev.voir.reflector.sync.core.conflict.ConflictOrigin
 import dev.voir.reflector.sync.core.log.SyncLogEvent
@@ -13,6 +15,7 @@ import dev.voir.reflector.sync.core.metrics.SyncMetrics
 import dev.voir.reflector.sync.core.metrics.emit
 import dev.voir.reflector.sync.core.transport.SyncTransport
 import dev.voir.reflector.sync.core.transport.SyncTransportFailure
+import dev.voir.reflector.sync.engine.blob.BlobReferences
 import dev.voir.reflector.sync.engine.mutation.EntityKey
 import dev.voir.reflector.sync.engine.retry.BackoffPolicy
 import dev.voir.reflector.sync.persistence.SyncStores
@@ -21,6 +24,7 @@ import dev.voir.reflector.sync.persistence.group.PendingGroup
 import dev.voir.reflector.sync.persistence.group.PushGroupState
 import dev.voir.reflector.sync.persistence.record.MutationIntent
 import dev.voir.reflector.sync.persistence.record.RecordState
+import dev.voir.reflector.sync.protocol.BlobId
 import dev.voir.reflector.sync.protocol.ClientId
 import dev.voir.reflector.sync.protocol.CollectionId
 import dev.voir.reflector.sync.protocol.GroupId
@@ -71,6 +75,10 @@ import kotlin.uuid.Uuid
  *   adapter's callback left that state saying the last attempt had succeeded.
  * @param clock Source of local time; used only for backoff and diagnostics, never for ordering.
  * @param newUuid Source of identifiers; injected so that tests can make them predictable.
+ * @param references Record of what each document points at, or `null` when the application
+ *   synchronises no files. When it is present the envelope carries the reference set of every
+ *   document it sends, and a group holding a record that cannot be published without its file waits
+ *   here until that file is on the server.
  * @param maxDependencyMerges Ceiling on merges caused by dependency refusals.
  */
 internal class PushCoordinator(
@@ -88,6 +96,7 @@ internal class PushCoordinator(
     private val reportFailure: (SyncFailure) -> Unit = {},
     private val clock: Clock,
     private val newUuid: () -> Uuid,
+    private val references: BlobReferences? = null,
     private val maxDependencyMerges: Int = DEFAULT_MAX_DEPENDENCY_MERGES,
 ) {
     /**
@@ -348,7 +357,6 @@ internal class PushCoordinator(
             // case the server keeps its result for — unless the group has been edited since, which
             // `rebuiltIfChanged` below catches and gives a new one.
             PushGroupState.IN_FLIGHT -> {
-                Unit
             }
 
             // Waiting for a decision, or refused for good. The rest of the queue waits with it:
@@ -361,9 +369,8 @@ internal class PushCoordinator(
         }
 
         val group = rebuiltIfChanged(head)
-        stores.groups.setState(group.groupId, PushGroupState.IN_FLIGHT)
-        stores.records.capturePushingRevisions(group.groupId)
         val records = stores.records.ofGroup(group.groupId).filter { it.isDirty }
+        val generation = stores.collections.ensure(scope, collection).generation
 
         val sent = mutableMapOf<EntityKey, JsonObject?>()
         val ops =
@@ -371,6 +378,9 @@ internal class PushCoordinator(
                 val payload = if (record.intent == MutationIntent.DELETE) null else snapshotOf(record)
                 sent[EntityKey(record.entityType, record.entityId)] = payload
                 if (payload == null) {
+                    // The document is gone and can point at nothing. Recorded here rather than at
+                    // the acknowledgement, because this is the transaction the removal belongs to.
+                    references?.clear(record.entityType, record.entityId)
                     PushOperation.Delete(
                         entity = record.entityType,
                         id = record.entityId,
@@ -382,9 +392,31 @@ internal class PushCoordinator(
                         id = record.entityId,
                         baseVersion = record.serverVersion,
                         data = payload,
+                        // Null from a client that synchronises no files, which the server reads as
+                        // "leave the stored references alone" rather than as "there are none".
+                        blobs = declaredBlobs(record, payload, generation),
                     )
                 }
             }
+
+        // Asked after the documents have been materialised, because the references only exist once
+        // the adapter has been asked about them, and before the group is marked as sent, because a
+        // group that waits here has not been sent at all.
+        waitingOnBlobs(records)?.let { blocked ->
+            log.debug(
+                SyncLogEvent.PUSH_WAITING,
+                context = {
+                    mapOf(
+                        "group" to group.groupId.value.toString(),
+                        "blob" to blocked.value.toString(),
+                    )
+                },
+            ) { "the group holds a record that cannot be published before its file is on the server" }
+            return Preparation.Waiting(group.groupId, PushGroupState.PENDING, group.attempts)
+        }
+
+        stores.groups.setState(group.groupId, PushGroupState.IN_FLIGHT)
+        stores.records.capturePushingRevisions(group.groupId)
 
         oversized(ops, sent)?.let { reason ->
             failGroup(group.groupId, reason.message)
@@ -475,6 +507,79 @@ internal class PushCoordinator(
     private suspend fun snapshotOf(record: RecordState): JsonObject? =
         adapter.snapshot(record.entityType, record.entityId)
 
+    /**
+     * Returns a file the group cannot be sent without, if one is not on the server yet.
+     *
+     * Only bindings that say so hold a group back. A deferred reference — the default, and what a
+     * receipt or an avatar should be — never appears here, which is the whole of what that default
+     * means once it reaches the queue: the record goes out now and its file follows.
+     *
+     * @param records Dirty records of the group.
+     * @return A file that is holding the group, or `null` when nothing is.
+     */
+    private suspend fun waitingOnBlobs(records: List<RecordState>): BlobId? {
+        val references = references ?: return null
+        for (record in records) {
+            for (ref in references.of(record.entityType, record.entityId)) {
+                val state = stores.blobs.find(scope, collection, ref.id)?.state
+                val ready =
+                    when (ref.binding) {
+                        // The file has to be usable, which is what this binding is for — and usable
+                        // means on the server, not on this device. A file that arrived from another
+                        // device is on the server by definition, whether this device has fetched the
+                        // bytes yet or has declined to under
+                        // [dev.voir.reflector.sync.core.blob.BlobFetch.ON_DEMAND]. Asking for
+                        // UPLOADED or READY alone would hold a group for a download nobody asked
+                        // for, and under that policy would hold it for good.
+                        BlobBinding.REQUIRED -> {
+                            state == BlobTransferState.UPLOADED ||
+                                state == BlobTransferState.READY ||
+                                state == BlobTransferState.REMOTE ||
+                                state == BlobTransferState.DOWNLOADING
+                        }
+
+                        // The server only has to have heard of it. A document naming a file that was
+                        // never registered is refused outright, so "publish the record first" still
+                        // costs one round trip — a registration, not a transfer, and the bytes follow
+                        // long afterwards. A file already given up on does not hold anything back:
+                        // it is never going to be registered, and the reference is the application's
+                        // to withdraw.
+                        BlobBinding.DEFERRED -> {
+                            state != null && state != BlobTransferState.LOCAL
+                        }
+                    }
+                if (!ready) {
+                    return ref.id
+                }
+            }
+        }
+        return null
+    }
+
+    /**
+     * Returns the files a document points at that the server has heard of.
+     *
+     * A reference to a file that was never registered is left out rather than sent: the server would
+     * refuse the whole group for it, and there is nothing on the server for the reference to protect
+     * anyway. The local reference stays, so the application is still told about the file and can
+     * still withdraw it.
+     *
+     * @param record Record whose document is being sent.
+     * @return Identifiers to put on the operation, or `null` when this client tracks no files.
+     */
+    private suspend fun declaredBlobs(
+        record: RecordState,
+        document: JsonObject,
+        generation: Long,
+    ): List<BlobId>? {
+        val references = references ?: return null
+        val declared = references.declare(record.entityType, record.entityId, document, generation)
+        return declared.filter { blobId ->
+            val state = stores.blobs.find(scope, collection, blobId)?.state
+            state != null && state != BlobTransferState.LOCAL && state != BlobTransferState.UNAVAILABLE
+        }
+    }
+
     private fun oversized(
         ops: List<PushOperation>,
         sent: Map<EntityKey, JsonObject?>,
@@ -535,6 +640,8 @@ internal class PushCoordinator(
             is PushGroupResult.Rejected -> {
                 if (result.error.code == RejectCode.DEPENDENCY) {
                     mergeAfterDependency(prepared.group, result.error.message)
+                } else if (result.error.code == RejectCode.BLOB_MISSING) {
+                    reuploadAndRetry(prepared.group, result.error.message)
                 } else {
                     failGroup(prepared.group.groupId, result.error.message)
                     adapter.onRejected(result.error.entity, result.error.id, result.error.toRejection())
@@ -551,6 +658,62 @@ internal class PushCoordinator(
                 }
             }
         }
+
+    /**
+     * Answers a group refused because a file it names is not on the server.
+     *
+     * The second refusal a retry can fix, and unlike every other one it is not the application's to
+     * correct: the files this group points at were collected as garbage while it sat blocked for
+     * longer than the retention window, which is not something anybody did wrong. They are put back
+     * to where an unregistered file starts, so the file worker registers and sends them again, and
+     * the group waits its backoff and goes out once they have landed.
+     *
+     * The group keeps its identifier. Its content has not changed, and the server stored no answer
+     * it could be given: a refusal for a missing file is recorded like any other, so the retry must
+     * come under a new one — which [rebuiltIfChanged] does when the queue next reaches it, because
+     * an attempt has been made on it.
+     *
+     * @param group Group that was refused.
+     * @param message What the server said.
+     * @return What the worker should do next.
+     */
+    private suspend fun reuploadAndRetry(
+        group: PendingGroup,
+        message: String,
+    ): PushOutcome {
+        val references = references
+        if (references != null) {
+            for (record in stores.records.ofGroup(group.groupId)) {
+                for (ref in references.of(record.entityType, record.entityId)) {
+                    stores.blobs.setState(scope, collection, ref.id, BlobTransferState.LOCAL)
+                    // Sending a file again is wanting it here, which is not something a fetch policy
+                    // has a say in: a file left unfetched under
+                    // [dev.voir.reflector.sync.core.blob.BlobFetch.ON_DEMAND] that the server has
+                    // since collected has to be looked at rather than left, even if all the worker
+                    // can discover is that its bytes were never on this device and the application
+                    // has to withdraw the reference.
+                    stores.blobs.setWanted(scope, collection, ref.id, wanted = true)
+                }
+            }
+        }
+        val delay = backoff.nextDelay(group.attempts + 1)
+        stores.groups.recordAttempt(
+            groupId = group.groupId,
+            state = PushGroupState.PENDING,
+            nextRetryAt = clock.now().toEpochMilliseconds() + delay.inWholeMilliseconds,
+            error = message,
+        )
+        log.info(
+            SyncLogEvent.PUSH_BLOBS_MISSING,
+            context = {
+                mapOf(
+                    "group" to group.groupId.value.toString(),
+                    "retryInMs" to delay.inWholeMilliseconds.toString(),
+                )
+            },
+        ) { "the server no longer has files this group names; they are sent again and the group follows them" }
+        return PushOutcome.Blocked
+    }
 
     /**
      * Retires an applied group and collects whatever stayed dirty into a fresh one.

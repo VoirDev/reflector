@@ -37,5 +37,20 @@ public value class RejectCode(
 
         /** The group or one of its documents exceeds the limits published by the server. */
         public val TOO_LARGE: RejectCode = RejectCode("TOO_LARGE")
+
+        /**
+         * An operation references a blob this collection has never heard of.
+         *
+         * Never heard of rather than not ready: a blob that is registered and still uploading is
+         * accepted, because a record is allowed to be published ahead of its file. What this refuses
+         * is a reference to an identifier that was never registered, and one to a blob that has
+         * already been collected as garbage — which is what a client meets when its group sat
+         * blocked for longer than the retention window.
+         *
+         * The second refusal a retry can fix, after [DEPENDENCY], and the client's answer is its
+         * own: register and upload those blobs again, then re-send the group under a **new**
+         * identifier, because the server stored an answer under the old one.
+         */
+        public val BLOB_MISSING: RejectCode = RejectCode("BLOB_MISSING")
     }
 }

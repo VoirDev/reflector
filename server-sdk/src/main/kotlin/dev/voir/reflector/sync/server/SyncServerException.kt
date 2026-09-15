@@ -1,9 +1,9 @@
 package dev.voir.reflector.sync.server
 
+import dev.voir.reflector.sync.protocol.BlobId
 import dev.voir.reflector.sync.protocol.CollectionEpoch
 import dev.voir.reflector.sync.protocol.CollectionId
 import dev.voir.reflector.sync.protocol.Cursor
-import dev.voir.reflector.sync.protocol.EntityType
 
 /**
  * Failure the host has to translate into its transport.
@@ -59,18 +59,73 @@ public sealed class SyncServerException(
         )
 
     /**
-     * The entity type is not accepted by the collection.
+     * No blob with that identifier was ever registered in this collection.
      *
-     * Reported to the client as a refused group rather than thrown to the host: it is bad data, not
-     * a broken request.
+     * The host answers `404`. It is also the answer for a blob that was collected as garbage: from
+     * the module's side those are the same fact, and telling them apart would mean keeping a
+     * tombstone for every file ever deleted in order to say "this used to exist" to a client whose
+     * recovery is identical either way.
      *
-     * @property collection Collection the write was addressed to.
-     * @property entityType Type the client used.
+     * @property collection Collection the client addressed.
+     * @property blobId Blob the client asked about.
      */
-    public class UnknownEntityTypeException(
+    public class UnknownBlobException(
         public val collection: CollectionId,
-        public val entityType: EntityType,
-    ) : SyncServerException("collection ${collection.value} does not accept entity type ${entityType.value}")
+        public val blobId: BlobId,
+    ) : SyncServerException("blob ${blobId.value} is not registered in collection ${collection.value}")
+
+    /**
+     * The identifier already names a usable blob whose bytes are not the ones now being declared.
+     *
+     * The host answers `409`. A blob is immutable, so this is a client bug rather than a race: two
+     * different files were given one identifier, and accepting either would silently change what
+     * every device that already fetched it is holding.
+     *
+     * @property collection Collection the client addressed.
+     * @property blobId Blob the client tried to register again.
+     */
+    public class BlobConflictException(
+        public val collection: CollectionId,
+        public val blobId: BlobId,
+    ) : SyncServerException(
+            "blob ${blobId.value} of collection ${collection.value} already holds different bytes",
+        )
+
+    /**
+     * The storage holds no such object, or one that disagrees with what was declared.
+     *
+     * The host answers `409`. The blob stays registered and unusable, which is recoverable: the
+     * client transfers again under the same identifier, because nothing was ever accepted under it.
+     *
+     * @property collection Collection the client addressed.
+     * @property blobId Blob whose object was looked for.
+     * @property reason What disagreed, for the host's logs.
+     */
+    public class BlobNotStoredException(
+        public val collection: CollectionId,
+        public val blobId: BlobId,
+        public val reason: String,
+    ) : SyncServerException("blob ${blobId.value} of collection ${collection.value} was not accepted: $reason")
+
+    /**
+     * The declared size exceeds the limit the deployment publishes.
+     *
+     * The host answers `413`. Refused at registration, before a ticket exists, because the point of
+     * publishing the limit is that nobody pays to transfer a file that was never going to be kept.
+     *
+     * @property collection Collection the client addressed.
+     * @property blobId Blob the client tried to register.
+     * @property size Size the client declared.
+     * @property limit Largest size this deployment accepts.
+     */
+    public class BlobTooLargeException(
+        public val collection: CollectionId,
+        public val blobId: BlobId,
+        public val size: Long,
+        public val limit: Long,
+    ) : SyncServerException(
+            "blob ${blobId.value} of collection ${collection.value} declares $size octets, over the limit of $limit",
+        )
 }
 
 /** Shorthand for [SyncServerException.CursorTooOldException]. */
@@ -82,5 +137,14 @@ public typealias UnknownCollectionException = SyncServerException.UnknownCollect
 /** Shorthand for [SyncServerException.CollectionResetException]. */
 public typealias CollectionResetException = SyncServerException.CollectionResetException
 
-/** Shorthand for [SyncServerException.UnknownEntityTypeException]. */
-public typealias UnknownEntityTypeException = SyncServerException.UnknownEntityTypeException
+/** Shorthand for [SyncServerException.UnknownBlobException]. */
+public typealias UnknownBlobException = SyncServerException.UnknownBlobException
+
+/** Shorthand for [SyncServerException.BlobConflictException]. */
+public typealias BlobConflictException = SyncServerException.BlobConflictException
+
+/** Shorthand for [SyncServerException.BlobNotStoredException]. */
+public typealias BlobNotStoredException = SyncServerException.BlobNotStoredException
+
+/** Shorthand for [SyncServerException.BlobTooLargeException]. */
+public typealias BlobTooLargeException = SyncServerException.BlobTooLargeException

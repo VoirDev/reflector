@@ -110,6 +110,45 @@ public sealed class SyncMetricEvent {
     ) : SyncMetricEvent()
 
     /**
+     * One file finished moving.
+     *
+     * [duration] against [bytes] is the number that says whether attachments are arriving in seconds
+     * or in hours — which, under the binding most applications will use, is exactly how long a record
+     * stands on other devices without its file.
+     *
+     * @property scope Scope the file belongs to.
+     * @property collection Collection the file belongs to.
+     * @property bytes Size of the file, in octets.
+     * @property duration How long the transfer took, by the device's clock.
+     * @property outgoing Whether the file was being sent rather than fetched. The two fail for
+     *   different reasons and at different rates, and a single number would hide both.
+     */
+    public data class BlobTransferred(
+        override val scope: ScopeId,
+        override val collection: CollectionId,
+        public val bytes: Long,
+        public val duration: Duration,
+        public val outgoing: Boolean,
+    ) : SyncMetricEvent()
+
+    /**
+     * One file will not arrive, and the application has been told.
+     *
+     * The end of the line for one file. Counted separately from a transfer that merely failed,
+     * because the two say different things about a deployment: transfers that fail and then succeed
+     * are a network, and files given up on are data a user has lost sight of.
+     *
+     * @property scope Scope the file belongs to.
+     * @property collection Collection the file belongs to.
+     * @property reason Which kind of dead end it was.
+     */
+    public data class BlobUnavailable(
+        override val scope: ScopeId,
+        override val collection: CollectionId,
+        public val reason: String,
+    ) : SyncMetricEvent()
+
+    /**
      * Depth of the queue and of the conflict list at the end of one synchronisation cycle.
      *
      * A gauge rather than a count of events, and the one that says whether the rest of them add up:
@@ -120,11 +159,15 @@ public sealed class SyncMetricEvent {
      * @property collection Collection that was worked on.
      * @property pendingCount Local changes that have not reached the server.
      * @property conflictCount Conflicts open and waiting for a decision.
+     * @property pendingBlobs Files this device holds that the server does not have yet.
+     * @property incomingBlobs Files the server has that this device does not.
      */
     public data class QueueObserved(
         override val scope: ScopeId,
         override val collection: CollectionId,
         public val pendingCount: Int,
         public val conflictCount: Int,
+        public val pendingBlobs: Int = 0,
+        public val incomingBlobs: Int = 0,
     ) : SyncMetricEvent()
 }

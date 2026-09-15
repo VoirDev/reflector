@@ -78,6 +78,81 @@ public enum class SyncLogEvent(
      */
     GROUPS_MERGED(SyncLogSource.MUTATION),
 
+    /**
+     * A file named by a document was looked into for the first time.
+     *
+     * Says which way it is about to travel, which is the one question reconciliation answers: bytes
+     * on this device are waiting to be sent, and bytes that are not are waiting to be fetched.
+     */
+    BLOB_ADOPTED(SyncLogSource.BLOBS),
+
+    /** No document names a file any more, so the application was offered it back. */
+    BLOB_RELEASED(SyncLogSource.BLOBS),
+
+    /**
+     * The application asked for a file this device was not going to fetch on its own.
+     *
+     * The answer to "why is this downloading now", which under
+     * [dev.voir.reflector.sync.core.blob.BlobFetch.ON_DEMAND] has no other answer: nothing about
+     * the log changed and no timer fired — somebody opened a record. Recorded as a warning instead
+     * when the file is one no document of the collection names, because then nothing will be
+     * fetched and the application has asked for something it has not declared.
+     */
+    BLOB_REQUESTED(SyncLogSource.BLOBS),
+
+    /**
+     * A file's bytes were given up on this device, and the server still has the file.
+     *
+     * Not the same as [BLOB_RELEASED]: nothing stopped referencing anything, and the file can be
+     * fetched again. Recorded as a warning instead when the bytes were the only copy, in which case
+     * they stay.
+     */
+    BLOB_EVICTED(SyncLogSource.BLOBS),
+
+    /**
+     * A group was refused because files it names are no longer on the server.
+     *
+     * Collected as garbage while the group sat blocked for longer than the retention window. Not
+     * anybody's mistake and not the application's to correct: the files are sent again and the group
+     * follows them.
+     */
+    PUSH_BLOBS_MISSING(SyncLogSource.PUSH),
+
+    /** A file's bytes reached the server and a record waiting for it can go out. */
+    BLOB_UPLOADED(SyncLogSource.BLOBS),
+
+    /** A file's bytes reached this device. */
+    BLOB_DOWNLOADED(SyncLogSource.BLOBS),
+
+    /**
+     * A file was asked for and the server does not have its bytes yet.
+     *
+     * Not a failure. It is the ordinary state of an attachment whose record arrived ahead of it,
+     * which is what the default binding produces on purpose, and it is answered by waiting.
+     */
+    BLOB_NOT_READY(SyncLogSource.BLOBS),
+
+    /** A transfer did not complete and will be tried again. */
+    BLOB_TRANSFER_FAILED(SyncLogSource.BLOBS),
+
+    /**
+     * A file will not arrive, and the application has been told.
+     *
+     * The end of the line for one file, from either direction: bytes that are gone from this device
+     * before they could be sent, or a server that no longer has the ones this device never fetched.
+     * The reference is deliberately left alone — dropping it would be the library editing the
+     * application's document on a judgement of its own.
+     */
+    BLOB_UNAVAILABLE(SyncLogSource.BLOBS),
+
+    /**
+     * The application threw when told about a file nothing references.
+     *
+     * The file stays tracked and is offered again on the next cycle, which is the safe direction: an
+     * application that failed to hear must not end up with a file neither side is accounting for.
+     */
+    BLOB_RELEASE_FAILED(SyncLogSource.BLOBS),
+
     /** The head of the queue could not be sent this cycle, with what it is waiting for. */
     PUSH_WAITING(SyncLogSource.PUSH),
 

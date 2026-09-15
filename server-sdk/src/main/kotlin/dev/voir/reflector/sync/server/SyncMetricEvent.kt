@@ -47,6 +47,72 @@ public sealed class SyncMetricEvent {
     ) : SyncMetricEvent()
 
     /**
+     * A blob was registered and its bytes were asked for.
+     *
+     * @property scope Scope the blob belongs to.
+     * @property collection Collection the blob belongs to.
+     * @property size Size the client declared, in octets.
+     * @property repeated Whether the blob was already registered, which is what a device that
+     *   crashed mid-transfer produces. A rate that is not small says devices are failing to finish.
+     */
+    public data class BlobRegistered(
+        override val scope: ScopeId,
+        override val collection: CollectionId,
+        public val size: Long,
+        public val repeated: Boolean,
+    ) : SyncMetricEvent()
+
+    /**
+     * A blob's bytes were accepted and the blob became usable.
+     *
+     * [transferred] is the number the host cannot obtain from either side alone: the device knows
+     * when it started and the storage knows when it finished, and only the module sees both ends. It
+     * is what says whether attachments are arriving in seconds or in hours, which on the default
+     * binding is exactly how long a record stands on other devices without its file.
+     *
+     * @property scope Scope the blob belongs to.
+     * @property collection Collection the blob belongs to.
+     * @property size Size of the accepted blob, in octets.
+     * @property transferred Time from registering the blob to accepting its bytes.
+     */
+    public data class BlobAccepted(
+        override val scope: ScopeId,
+        override val collection: CollectionId,
+        public val size: Long,
+        public val transferred: Duration,
+    ) : SyncMetricEvent()
+
+    /**
+     * A blob's bytes were claimed to be in storage and were refused.
+     *
+     * @property scope Scope the blob belongs to.
+     * @property collection Collection the blob belongs to.
+     * @property reason Why the claim was refused.
+     */
+    public data class BlobRefused(
+        override val scope: ScopeId,
+        override val collection: CollectionId,
+        public val reason: BlobRefusalReason,
+    ) : SyncMetricEvent()
+
+    /**
+     * One collection's files were swept.
+     *
+     * @property scope Scope the collection belongs to.
+     * @property collection Collection that was swept.
+     * @property released Files nothing referenced any more, whose rows were dropped and whose keys
+     *   were handed to the host for disposal.
+     * @property bytes Size of everything the sweep let go of, which is what the storage stands to
+     *   recover once the host disposes of it.
+     */
+    public data class BlobsCollected(
+        override val scope: ScopeId,
+        override val collection: CollectionId,
+        public val released: Int,
+        public val bytes: Long,
+    ) : SyncMetricEvent()
+
+    /**
      * A page of the change log was served to a client.
      *
      * [cursorLag] is the client's distance from the head at the moment it asked, in sequences. It is

@@ -5,10 +5,13 @@ import dev.voir.reflector.sync.core.CollectionSyncState
 import dev.voir.reflector.sync.core.ConflictThreshold
 import dev.voir.reflector.sync.core.MutationScope
 import dev.voir.reflector.sync.core.SyncPhase
+import dev.voir.reflector.sync.core.blob.BlobSyncState
+import dev.voir.reflector.sync.core.blob.BlobTransferState
 import dev.voir.reflector.sync.core.conflict.Conflict
 import dev.voir.reflector.sync.core.conflict.ConflictId
 import dev.voir.reflector.sync.core.conflict.Resolution
 import dev.voir.reflector.sync.core.diagnostics.CollectionDiagnostics
+import dev.voir.reflector.sync.core.diagnostics.QueuedBlobDiagnostics
 import dev.voir.reflector.sync.core.diagnostics.QueuedGroupDiagnostics
 import dev.voir.reflector.sync.engine.conflict.ConflictCoordinator
 import dev.voir.reflector.sync.engine.mutation.MutationCoordinator
@@ -16,6 +19,7 @@ import dev.voir.reflector.sync.persistence.SyncStores
 import dev.voir.reflector.sync.persistence.SyncTransactionRunner
 import dev.voir.reflector.sync.persistence.conflict.StoredConflict
 import dev.voir.reflector.sync.persistence.group.PendingGroup
+import dev.voir.reflector.sync.protocol.BlobId
 import dev.voir.reflector.sync.protocol.CollectionId
 import dev.voir.reflector.sync.protocol.ScopeId
 import kotlinx.coroutines.CoroutineScope
@@ -63,12 +67,25 @@ internal class DefaultCollectionHandle(
             stores.records.observePendingCount(scope, collection),
             stores.conflicts.observeCount(scope, collection),
             worker.lastFailure,
-        ) { collectionState, pending, conflictCount, failure ->
+            // The two file counts are combined into one pair first: `combine` takes five flows at
+            // most, and a sixth would mean reaching for the list-of-flows overload and losing every
+            // type in the lambda.
+            combine(
+                stores.blobs.observeCount(scope, collection, BlobTransferState.LOCAL),
+                stores.blobs.observeCount(scope, collection, BlobTransferState.UPLOADING),
+                stores.blobs.observeCount(scope, collection, BlobTransferState.REMOTE),
+                stores.blobs.observeCount(scope, collection, BlobTransferState.DOWNLOADING),
+            ) { local, uploading, remote, downloading ->
+                (local + uploading) to (remote + downloading)
+            },
+        ) { collectionState, pending, conflictCount, failure, files ->
             CollectionSyncState(
                 phase = publishedPhase(collectionState?.phase ?: SyncPhase.NEW, conflictCount),
                 pendingCount = pending,
                 conflictCount = conflictCount,
                 lastFailure = failure,
+                pendingBlobs = files.first,
+                incomingBlobs = files.second,
             )
         }.stateIn(
             scope = coroutineScope,
@@ -76,8 +93,29 @@ internal class DefaultCollectionHandle(
             initialValue = CollectionSyncState(SyncPhase.NEW, pendingCount = 0, conflictCount = 0, lastFailure = null),
         )
 
+    override fun blob(id: BlobId): Flow<BlobSyncState?> =
+        stores.blobs.observe(scope, collection, id).map { record ->
+            record?.let {
+                BlobSyncState(
+                    state = it.state,
+                    wanted = it.wanted,
+                    size = it.stat?.size,
+                    transferred = it.transferred,
+                    lastError = it.lastError,
+                )
+            }
+        }
+
     override val conflicts: Flow<List<Conflict>> =
         stores.conflicts.observe(scope, collection).map { stored -> stored.map { it.toConflict() } }
+
+    override suspend fun fetch(id: BlobId) {
+        worker.fetchBlob(id)
+    }
+
+    override suspend fun evict(id: BlobId) {
+        worker.evictBlob(id)
+    }
 
     override suspend fun <R> mutate(block: suspend MutationScope.() -> R): R {
         val result = mutations.mutate(scope, collection) { block() }
@@ -133,6 +171,20 @@ internal class DefaultCollectionHandle(
                 lastPullAt = stored.lastPullAt,
                 lastPushAt = stored.lastPushAt,
                 queue = queue.map { group -> group.describe() },
+                files =
+                    stores.blobs.allWithReferences(scope, collection).map { (record, referenced) ->
+                        QueuedBlobDiagnostics(
+                            blobId = record.blobId,
+                            state = record.state,
+                            wanted = record.wanted,
+                            size = record.stat?.size,
+                            transferred = record.transferred,
+                            attempts = record.attempts,
+                            nextRetryAt = record.nextRetryAt?.let(Instant::fromEpochMilliseconds),
+                            referenced = referenced,
+                            lastError = record.lastError,
+                        )
+                    },
             )
         }
 

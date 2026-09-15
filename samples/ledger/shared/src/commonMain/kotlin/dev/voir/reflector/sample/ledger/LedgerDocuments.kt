@@ -13,11 +13,15 @@ import kotlin.uuid.Uuid
  *
  * @property title Name the user gave the wallet.
  * @property currency ISO-4217 code of the wallet's currency.
+ * @property photoBlobId Photograph attached to the wallet, or `null` when there is none. An
+ *   ordinary field of the document, which is the whole of how a file is referenced: the library
+ *   never reads this — it asks the adapter what the document points at.
  */
 @Serializable
 data class WalletDocument(
     val title: String,
     val currency: String,
+    val photoBlobId: Uuid? = null,
 )
 
 /**

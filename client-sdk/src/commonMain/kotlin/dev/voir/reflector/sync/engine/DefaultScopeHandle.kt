@@ -6,10 +6,13 @@ import dev.voir.reflector.sync.core.ScopeHandle
 import dev.voir.reflector.sync.core.ScopeState
 import dev.voir.reflector.sync.core.SyncPhase
 import dev.voir.reflector.sync.core.adapter.CollectionAdapter
+import dev.voir.reflector.sync.core.blob.BlobFetch
+import dev.voir.reflector.sync.core.blob.BlobStore
 import dev.voir.reflector.sync.core.log.SyncLog
 import dev.voir.reflector.sync.core.log.SyncLogEvent
 import dev.voir.reflector.sync.core.log.SyncLogger
 import dev.voir.reflector.sync.core.metrics.SyncMetrics
+import dev.voir.reflector.sync.core.transport.BlobTransport
 import dev.voir.reflector.sync.core.transport.SyncChannelSignal
 import dev.voir.reflector.sync.core.transport.SyncEventChannel
 import dev.voir.reflector.sync.core.transport.SyncTransport
@@ -45,6 +48,9 @@ import kotlin.uuid.Uuid
  * @param transactions Transaction boundary of the application's database.
  * @param transport Connection to the server.
  * @param adapters Application's bridge per collection; a collection without one cannot be opened.
+ * @param blobStore Application's own file store, or `null` when it synchronises no files.
+ * @param blobTransport Connection to the server's file endpoints, required alongside [blobStore].
+ * @param blobFetch Policy for a reference that declares none of its own.
  * @param eventChannel Optional push channel; without it the scope still synchronises, only on its
  *   own triggers rather than on the server's.
  * @param triggerSources Reasons to synchronise that the application supplies — returning to the
@@ -63,6 +69,9 @@ internal class DefaultScopeHandle(
     private val transactions: SyncTransactionRunner,
     private val transport: SyncTransport,
     private val adapters: Map<CollectionId, CollectionAdapter>,
+    private val blobStore: BlobStore?,
+    private val blobTransport: BlobTransport?,
+    private val blobFetch: BlobFetch,
     private val eventChannel: SyncEventChannel?,
     private val triggerSources: List<SyncTriggerSource>,
     private val conflictThreshold: ConflictThreshold,
@@ -131,6 +140,9 @@ internal class DefaultScopeHandle(
                     coroutineScope = workerScope,
                     clock = clock,
                     newUuid = newUuid,
+                    blobStore = blobStore,
+                    blobTransport = blobTransport,
+                    blobFetch = blobFetch,
                 ).also {
                     it.start()
                     workersByCollection[id] = it
@@ -209,6 +221,13 @@ internal class DefaultScopeHandle(
                 mutableState.value = ScopeState.Revoked
             }
 
+            // Straight to the file worker rather than to the cycle. The record naming this file
+            // arrived long ago and nothing about the log has changed; what has changed is only that
+            // the bytes became fetchable, and a pull would not discover that.
+            is SyncEvent.BlobReady -> {
+                workersByCollection[event.collection]?.requestTransfers()
+            }
+
             // An event this client does not understand may well be a newer way of saying "there is
             // something to pull". An extra pull is harmless; a missed one is not.
             is SyncEvent.Unknown -> {
@@ -262,6 +281,7 @@ internal class DefaultScopeHandle(
     suspend fun wipe() {
         workers.cancelAndJoin()
         logger.debug(SyncLogEvent.SCOPE_WIPED) { "the workers have stopped; removing the scope's local data" }
+        removeFiles()
         transactions.transaction {
             adapters.keys.forEach { collection -> stores.inbox.clear(scopeId, collection) }
             stores.records.deleteScope(scopeId)
@@ -269,6 +289,45 @@ internal class DefaultScopeHandle(
             stores.conflicts.deleteScope(scopeId)
             stores.collections.deleteScope(scopeId)
             stores.meta.deleteScope(scopeId)
+            stores.blobs.deleteScope(scopeId)
+            stores.blobRefs.deleteScope(scopeId)
+        }
+    }
+
+    /**
+     * Tells the application to remove every file this scope brought in.
+     *
+     * Not the offer that reconciliation makes when a document stops pointing at something — that one
+     * an application is free to decline, and keeping a detached photograph for an undo stack is a
+     * correct answer to it. This is the same act as wiping the rows: the scope is going, and leaving
+     * a signed-out user's photographs in the application's store on a shared device is not a policy
+     * question. It is also what a revoked scope reaches, because an application answers that by
+     * signing out.
+     *
+     * Before the rows and after the workers have stopped: afterwards there is nothing left to say
+     * which files belonged to this scope, and a worker still running would be writing rows into what
+     * is being erased.
+     *
+     * A store that throws is logged and passed over. The rows go regardless — a scope that could not
+     * be wiped because one file refused to be deleted would leave the user signed in.
+     */
+    private suspend fun removeFiles() {
+        val store = blobStore ?: return
+        val files = transactions.transaction { stores.blobs.allOfScope(scopeId) }
+        for (file in files) {
+            runCatching { store.remove(file.blobId) }
+                .onFailure { failure ->
+                    logger.warn(
+                        SyncLogEvent.BLOB_RELEASE_FAILED,
+                        failure,
+                        context = { mapOf("blob" to file.blobId.value.toString()) },
+                    ) { "the application could not remove a file of a scope that is being wiped" }
+                }
+        }
+        if (files.isNotEmpty()) {
+            logger.info(SyncLogEvent.BLOB_RELEASED, context = { mapOf("files" to files.size.toString()) }) {
+                "the scope's files were handed back to the application before its data was removed"
+            }
         }
     }
 }

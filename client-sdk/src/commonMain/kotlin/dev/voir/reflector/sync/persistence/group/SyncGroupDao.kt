@@ -161,14 +161,6 @@ public interface SyncGroupDao {
     )
 
     /**
-     * Counts one more merge caused by a dependency refusal.
-     *
-     * @param groupId Group that was merged.
-     */
-    @Query("UPDATE sync_group SET dependency_merges = dependency_merges + 1 WHERE group_id = :groupId")
-    public suspend fun incrementDependencyMerges(groupId: Uuid)
-
-    /**
      * Sets the merge counter of a group.
      *
      * Needed because a merged group is a **new** group: the counter has to be carried over to it,

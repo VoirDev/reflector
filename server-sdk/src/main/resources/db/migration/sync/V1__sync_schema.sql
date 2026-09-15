@@ -91,3 +91,64 @@ CREATE TABLE sync.push_results (
         REFERENCES sync.collections (id) ON DELETE CASCADE,
     CONSTRAINT uq_push_results__client_id__group_id UNIQUE (client_id, group_id)
 );
+
+-- Purging reads these rows by collection, and the unique constraint above cannot serve it: that one
+-- leads on `client_id`, because idempotency looks a group up by the client that sent it. Without an
+-- index leading on `collection_id`, both the purge's own delete and the cascade from
+-- `sync.collections` scan the whole table once per collection.
+CREATE INDEX ix_push_results__collection_id ON sync.push_results (collection_id);
+
+-- Files.
+--
+-- The module orchestrates blobs without ever seeing one: the bytes travel between the device and
+-- the host's storage directly, and what is kept here is the metadata that says a blob exists, what
+-- was declared about it, whether it can be served yet, and whether anything still points at it.
+-- `storage_key` is whatever the host called the object; nothing here interprets it.
+CREATE TABLE sync.blobs (
+    id                 uuid          NOT NULL,
+    collection_id      uuid          NOT NULL,
+    blob_id            uuid          NOT NULL,
+    state              varchar(20)   NOT NULL,
+    storage_key        varchar(1024) NOT NULL,
+    content_type       varchar(255)  NOT NULL,
+    size               bigint        NOT NULL,
+    checksum           varchar(200)  NULL,
+    created_at         timestamptz   NOT NULL,
+    ready_at           timestamptz   NULL,
+    unreferenced_since timestamptz   NULL,
+    CONSTRAINT pk_blobs PRIMARY KEY (id),
+    CONSTRAINT fk_blobs__collection_id__collections FOREIGN KEY (collection_id)
+        REFERENCES sync.collections (id) ON DELETE CASCADE,
+    CONSTRAINT uq_blobs__collection_id__blob_id UNIQUE (collection_id, blob_id),
+    -- A blob becomes usable exactly once, and the moment it did is part of that fact. Without this
+    -- the two halves can drift, and the sweep that promotes stale uploads reads both.
+    CONSTRAINT ck_blobs__ready_at_matches_state CHECK ((state = 'READY') = (ready_at IS NOT NULL)),
+    CONSTRAINT ck_blobs__size_is_not_negative CHECK (size >= 0)
+);
+
+-- The collector reads exactly this: within one collection, the blobs nothing has pointed at since
+-- long enough ago. A partial index would be tempting, but `unreferenced_since` is set and cleared
+-- as references come and go, so most rows are null only while they are in use.
+CREATE INDEX ix_blobs__collection_id__unreferenced_since
+    ON sync.blobs (collection_id, unreferenced_since);
+
+-- What each entity's document points at, replaced whole every time that document is written. The
+-- set is the client's declaration rather than anything the module derives: it does not read
+-- documents, and the reference is a fact only the application's own schema knows.
+CREATE TABLE sync.blob_refs (
+    collection_id uuid         NOT NULL,
+    entity_type   varchar(100) NOT NULL,
+    entity_id     uuid         NOT NULL,
+    blob_id       uuid         NOT NULL,
+    CONSTRAINT pk_blob_refs PRIMARY KEY (collection_id, entity_type, entity_id, blob_id),
+    -- A reference genuinely cannot exist without its blob, which is the one case for CASCADE. It
+    -- is not what stops a blob in use from being deleted — `unreferenced_since` is — and it also
+    -- keeps a purge simple, since the cascade from `sync.collections` reaches both tables.
+    CONSTRAINT fk_blob_refs__collection_id__blob_id__blobs FOREIGN KEY (collection_id, blob_id)
+        REFERENCES sync.blobs (collection_id, blob_id) ON DELETE CASCADE
+);
+
+-- Answering "what still points at this blob", which is how a write decides whether the blob it
+-- just dropped became garbage. The primary key leads on the entity and cannot serve it.
+CREATE INDEX ix_blob_refs__collection_id__blob_id
+    ON sync.blob_refs (collection_id, blob_id);

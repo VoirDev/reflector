@@ -36,6 +36,16 @@ public enum class SyncLogEvent(
     METRICS_SINK_FAILED(SyncLogSource.MODULE),
 
     /**
+     * A host blob listener threw after a blob was accepted.
+     *
+     * The bytes are in storage and the blob stays usable. What is lost is whatever the host meant to
+     * do with the file — a thumbnail, a scan, an extraction — and nothing will ask again, because
+     * the listener fires once per blob. The one line that says a derivative is missing on purpose
+     * rather than by accident.
+     */
+    BLOB_LISTENER_FAILED(SyncLogSource.MODULE),
+
+    /**
      * A client arrived talking about an incarnation of a collection that no longer exists.
      *
      * It survived a purge. Reported from whichever path it reached — a push, a page of the log, a
@@ -72,6 +82,28 @@ public enum class SyncLogEvent(
      */
     LOCK_HELD_LONG(SyncLogSource.PUSH),
 
+    /** A blob was registered and an upload ticket handed out. */
+    BLOB_REGISTERED(SyncLogSource.BLOBS),
+
+    /** A blob's bytes were verified against what was declared, and the blob became usable. */
+    BLOB_ACCEPTED(SyncLogSource.BLOBS),
+
+    /**
+     * A blob's bytes were claimed to be in storage and were not, or did not match the declaration.
+     *
+     * Recoverable and expected at a low rate — a transfer that was cut off says exactly this — but a
+     * rate that climbs is the storage refusing writes, which is invisible from the module otherwise.
+     */
+    BLOB_REFUSED(SyncLogSource.BLOBS),
+
+    /**
+     * A blob already usable was registered or confirmed again, and was answered from what is stored.
+     *
+     * Idempotency working as designed, and worth a line for the same reason [GROUP_REPEATED] is: it
+     * is invisible elsewhere and confusing from the device's side, which believes it is uploading.
+     */
+    BLOB_REPEATED(SyncLogSource.BLOBS),
+
     /** A page of the change log was served. */
     CHANGES_SERVED(SyncLogSource.CHANGES),
 
@@ -91,6 +123,14 @@ public enum class SyncLogEvent(
 
     /** Retention trimming finished for one collection. */
     HISTORY_TRIMMED(SyncLogSource.MAINTENANCE),
+
+    /**
+     * Files nothing had referenced for longer than the retention window were let go of.
+     *
+     * Says what the module decided and stops there. What becomes of the objects is the host's, and
+     * is recorded where it happens rather than second-hand here.
+     */
+    BLOBS_COLLECTED(SyncLogSource.MAINTENANCE),
 
     /**
      * A collection was purged: every row of it was physically deleted.

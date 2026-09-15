@@ -7,6 +7,7 @@ import dev.voir.reflector.sync.core.conflict.ConflictId
 import dev.voir.reflector.sync.core.conflict.Resolution
 import dev.voir.reflector.sync.core.log.SyncLogEvent
 import dev.voir.reflector.sync.core.log.SyncLogger
+import dev.voir.reflector.sync.engine.blob.BlobReferences
 import dev.voir.reflector.sync.persistence.SyncStores
 import dev.voir.reflector.sync.persistence.SyncTransactionRunner
 import dev.voir.reflector.sync.persistence.conflict.StoredConflict
@@ -40,6 +41,7 @@ internal class ConflictCoordinator(
     private val adapter: CollectionAdapter,
     private val log: SyncLogger,
     private val newUuid: () -> Uuid,
+    private val references: BlobReferences? = null,
 ) {
     /**
      * Asks the application to decide about a conflict, if it can decide without the user.
@@ -133,6 +135,11 @@ internal class ConflictCoordinator(
                 ?.let { RemoteOp.Upsert(stored.entityType, stored.entityId, it) }
                 ?: RemoteOp.Delete(stored.entityType, stored.entityId)
         adapter.applyRemote(listOf(op))
+        // A decision changes the document, so it changes what the document points at. Taking the
+        // server's wallet moves the reference to the server's photograph, which is what then
+        // enqueues one download and offers the local file back — with no conflict machinery for
+        // files involved anywhere.
+        recordReferences(op)
         stores.records.takeServer(
             scope = scope,
             collection = collection,
@@ -142,11 +149,27 @@ internal class ConflictCoordinator(
         )
     }
 
+    /**
+     * Records what a resolved document points at.
+     *
+     * @param op Change just applied to the application's tables.
+     */
+    private suspend fun recordReferences(op: RemoteOp) {
+        val references = references ?: return
+        val generation = stores.collections.ensure(scope, collection).generation
+        when (op) {
+            is RemoteOp.Upsert -> references.declare(op.entityType, op.id, op.data, generation)
+            is RemoteOp.Delete -> references.clear(op.entityType, op.id)
+        }
+    }
+
     private suspend fun merge(
         stored: StoredConflict,
         resolution: Resolution.Merged,
     ) {
-        adapter.applyRemote(listOf(RemoteOp.Upsert(stored.entityType, stored.entityId, resolution.data)))
+        val merged = RemoteOp.Upsert(stored.entityType, stored.entityId, resolution.data)
+        adapter.applyRemote(listOf(merged))
+        recordReferences(merged)
         stores.records.keepLocal(
             scope = scope,
             collection = collection,

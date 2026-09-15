@@ -2,6 +2,9 @@ package dev.voir.reflector.sync.server.postgres
 
 import dev.voir.reflector.sync.protocol.CollectionId
 import dev.voir.reflector.sync.protocol.ScopeId
+import dev.voir.reflector.sync.server.SyncLog
+import dev.voir.reflector.sync.server.SyncLogEvent
+import dev.voir.reflector.sync.server.SyncLogger
 import dev.voir.reflector.sync.server.SyncMetricEvent
 import dev.voir.reflector.sync.server.SyncMetrics
 import dev.voir.reflector.sync.server.emit
@@ -32,13 +35,17 @@ import kotlin.time.Clock
  * @property retentionSeconds How long history is kept, in seconds.
  * @property clock Source of the current moment.
  * @property metrics Sink told, per collection, how much was removed and how much history is left.
+ * @property log Sink told the same, in the words of somebody reading the host's log.
  */
 public class SyncMaintenance internal constructor(
     private val database: Database,
     private val retentionSeconds: Long,
     private val clock: Clock,
     private val metrics: SyncMetrics,
+    private val log: SyncLog,
 ) {
+    private val logger = SyncLogger(log)
+
     /**
      * Removes history older than the retention window from every collection.
      *
@@ -96,7 +103,22 @@ public class SyncMaintenance internal constructor(
         // Reported once the deletions are durable, and never from inside the transaction: this
         // sweep walks every collection, and holding it open across the host's code would be paying
         // for a metric with a long-running write transaction.
-        trimmed.forEach(metrics::emit)
+        trimmed.forEach { event ->
+            metrics.emit(event, logger)
+            // A span that grows from one run to the next means history is accumulating faster than
+            // the window discards it, and every read of that collection gets slower with it.
+            logger
+                .forCollection(event.scope, event.collection)
+                .info(
+                    SyncLogEvent.HISTORY_TRIMMED,
+                    context = {
+                        mapOf(
+                            "removed" to event.removedBatches.toString(),
+                            "retainedSpan" to event.retainedSpan.toString(),
+                        )
+                    },
+                ) { "trimmed history to the retention window" }
+        }
         return removed
     }
 }

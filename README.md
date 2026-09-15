@@ -12,7 +12,7 @@ rows stay yours: your schema, your queries, your migrations.
 - [docs/sync-client-design.md](docs/sync-client-design.md) — the client specification
 - [docs/sync-server-design.md](docs/sync-server-design.md) — the server specification
 - [TODO.md](TODO.md) — work that is known and not yet done
-- [AGENTS.md](AGENTS.md) — repository rules and handbook reading order
+- [AGENTS.md](AGENTS.md) — repository rules, and which handbook skills to read before changing code
 
 The two specifications are the source of truth for the mechanism. What follows is the shape of it
 and the reasoning behind the choices.

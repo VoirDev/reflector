@@ -6,6 +6,7 @@ import dev.voir.reflector.sync.protocol.CollectionId
 import dev.voir.reflector.sync.protocol.EntityType
 import dev.voir.reflector.sync.server.CollectionSpec
 import dev.voir.reflector.sync.server.SyncCommitListener
+import dev.voir.reflector.sync.server.SyncLog
 import dev.voir.reflector.sync.server.postgres.SyncMigrations
 import dev.voir.reflector.sync.server.postgres.SyncModule
 import dev.voir.reflector.sync.server.syncConfig
@@ -31,11 +32,16 @@ val LEDGER: CollectionId = CollectionId("ledger")
  * anywhere else.
  */
 fun main() {
+    // Built once and handed to everything the module offers, so that one file — logback.xml —
+    // decides what the synchronisation module says and at which level, exactly as it does for the
+    // rest of this application.
+    val log = Slf4jSyncLog()
+
     val dataSource = dataSource()
-    SyncMigrations.migrate(dataSource)
+    SyncMigrations.migrate(dataSource, log)
 
     val events = ScopeEvents()
-    val module = ledgerSyncModule(Database.connect(dataSource), events)
+    val module = ledgerSyncModule(Database.connect(dataSource), events, log)
 
     // Retention is the host's schedule, not the module's: only the host knows what else runs on
     // this machine and when it is cheap to sweep.
@@ -43,6 +49,8 @@ fun main() {
     maintenance.launch {
         while (true) {
             delay(RETENTION_INTERVAL_MILLIS)
+            // The trim reports what it removed through the module's own log; this only has to keep
+            // one failed sweep from ending the schedule.
             runCatching { module.maintenance.trim() }
         }
     }
@@ -62,11 +70,14 @@ fun main() {
  *
  * @param database Database the host owns and the module writes its schema into.
  * @param events Delivery of commit notifications to connected sockets.
+ * @param log Where the module's own account of what it did goes; the default discards it, which is
+ *   what the tests want and what a host that has not wired its logging yet gets.
  * @return Module ready to serve.
  */
 fun ledgerSyncModule(
     database: Database,
     events: ScopeEvents,
+    log: SyncLog = SyncLog.None,
 ): SyncModule =
     SyncModule.create(
         database = database,
@@ -90,6 +101,7 @@ fun ledgerSyncModule(
                     events.publish(scope, collection, seq)
                 },
             ),
+        log = log,
     )
 
 private fun dataSource(): DataSource =

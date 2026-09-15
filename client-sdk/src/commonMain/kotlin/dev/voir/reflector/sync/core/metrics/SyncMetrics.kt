@@ -1,5 +1,8 @@
 package dev.voir.reflector.sync.core.metrics
 
+import dev.voir.reflector.sync.core.log.SyncLogEvent
+import dev.voir.reflector.sync.core.log.SyncLogger
+
 /**
  * Sink for what the library measures about itself, implemented by the application.
  *
@@ -38,10 +41,21 @@ public fun interface SyncMetrics {
  * Reports an event, absorbing whatever the application's implementation does with it.
  *
  * The contract says an implementation must not throw; this is what makes a violation cost the
- * application its metrics rather than its synchronisation.
+ * application its metrics rather than its synchronisation. It costs it the metric and no more than
+ * that: the throwable goes to the log, so a sink that has been broken since a refactoring is
+ * something a developer can find rather than something that quietly stopped counting.
  *
  * @param event Event to report.
+ * @param log Sink told when the application's implementation throws.
  */
-internal fun SyncMetrics.emit(event: SyncMetricEvent) {
+internal fun SyncMetrics.emit(
+    event: SyncMetricEvent,
+    log: SyncLogger,
+) {
     runCatching { record(event) }
+        .onFailure { failure ->
+            log.warn(SyncLogEvent.METRICS_SINK_FAILED, failure) {
+                "the metrics sink threw on ${event::class.simpleName}; the measurement is lost"
+            }
+        }
 }

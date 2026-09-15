@@ -1,6 +1,7 @@
 package dev.voir.reflector.sample.ledger
 
 import dev.voir.reflector.sync.core.SyncEngine
+import dev.voir.reflector.sync.core.log.SyncLog
 import dev.voir.reflector.sync.core.transport.SyncEventChannel
 import dev.voir.reflector.sync.core.transport.SyncTransport
 import dev.voir.reflector.sync.core.trigger.PeriodicTriggerSource
@@ -28,6 +29,8 @@ val LEDGER: CollectionId = CollectionId("ledger")
  * @param triggerSources Reasons to synchronise the application produces. A real application adds a
  *   [dev.voir.reflector.sync.core.trigger.ManualTriggerSource] here and fires it from its lifecycle
  *   observer and its connectivity callback; the timer left below is only the floor under those.
+ * @param log Where the library says what it is doing. The default discards everything, which is what
+ *   a release build wants; the Android application passes a logcat sink on a debuggable build.
  * @return Engine ready to hand out the scope of the signed-in user.
  */
 fun ledgerSync(
@@ -36,6 +39,7 @@ fun ledgerSync(
     coroutineScope: CoroutineScope,
     eventChannel: SyncEventChannel? = null,
     triggerSources: List<SyncTriggerSource> = listOf(PeriodicTriggerSource()),
+    log: SyncLog = SyncLog.None,
 ): SyncEngine =
     SyncEngine(
         database = database,
@@ -45,4 +49,5 @@ fun ledgerSync(
         coroutineScope = coroutineScope,
         eventChannel = eventChannel,
         triggerSources = triggerSources,
+        log = log,
     )

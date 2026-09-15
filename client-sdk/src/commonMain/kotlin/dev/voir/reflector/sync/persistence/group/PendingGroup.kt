@@ -13,6 +13,9 @@ import dev.voir.reflector.sync.protocol.GroupId
  *   milliseconds, or `null` when it may be sent immediately.
  * @property dependencyMerges Merges already caused by dependency refusals, bounded to keep a server
  *   that keeps refusing from making the client merge forever.
+ * @property lastError What the last attempt was refused or failed with, or `null` when there has
+ *   been no attempt. Written by every attempt and read only by diagnostics: it is the answer to why
+ *   a group is sitting in the queue, which the state alone does not give.
  */
 internal data class PendingGroup(
     public val groupId: GroupId,
@@ -21,4 +24,5 @@ internal data class PendingGroup(
     public val attempts: Int,
     public val nextRetryAt: Long?,
     public val dependencyMerges: Int,
+    public val lastError: String?,
 )

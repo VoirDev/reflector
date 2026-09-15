@@ -3,6 +3,7 @@ package dev.voir.reflector.sync.core
 import dev.voir.reflector.sync.core.conflict.Conflict
 import dev.voir.reflector.sync.core.conflict.ConflictId
 import dev.voir.reflector.sync.core.conflict.Resolution
+import dev.voir.reflector.sync.core.diagnostics.CollectionDiagnostics
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
 
@@ -73,4 +74,21 @@ public interface CollectionHandle {
         conflictId: ConflictId,
         resolution: Resolution,
     )
+
+    /**
+     * Reads everything the library knows about this collection, at this moment.
+     *
+     * For a developer rather than for a user interface. [state] is what a screen binds to and is
+     * kept deliberately small; this is what answers the question that state provokes — the queue
+     * itself, the error each group was last refused with, how far the cursor has got, and when a
+     * pull or a push last succeeded. Most of it is durable and therefore survives the restart after
+     * which a published `lastFailure` is gone.
+     *
+     * Reads the database, so it is not free and is not something to call on every frame. The values
+     * describe a moment that has passed by the time they are read: they are for a debug screen, a
+     * bug report or a log line, not for driving the engine.
+     *
+     * @return Snapshot of the collection's synchronisation state.
+     */
+    public suspend fun diagnostics(): CollectionDiagnostics
 }

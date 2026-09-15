@@ -10,6 +10,11 @@ import dev.voir.reflector.sync.protocol.EntityType
  * The cases differ in what the application can do about them, which is the only reason to
  * distinguish them: a transient failure needs no reaction, an authentication failure needs the
  * user, and a rejection needs the data to change before anything can move again.
+ *
+ * Whatever the library knows is kept rather than flattened into a sentence. A case that came from a
+ * throwable carries it, because the description of a fault in code this library does not own is
+ * worth very little without the stack that produced it; and a case the protocol names is reported
+ * as itself rather than as a status code standing in for it.
  */
 public sealed class SyncFailure {
     /** Human-readable description for logs and diagnostics; never a user-facing string. */
@@ -21,9 +26,13 @@ public sealed class SyncFailure {
      * Retried automatically with backoff; nothing is required from the application.
      *
      * @property message Description of the transport failure.
+     * @property cause Throwable behind it, when the transport had one. A refused connection, an
+     *   expired certificate and a name that does not resolve all arrive here as the same case, and
+     *   this is what tells them apart.
      */
     public data class Network(
         override val message: String,
+        public val cause: Throwable? = null,
     ) : SyncFailure()
 
     /**
@@ -58,14 +67,46 @@ public sealed class SyncFailure {
     ) : SyncFailure()
 
     /**
+     * The credentials were refused and the application could not renew them.
+     *
+     * The workers stop rather than back off: another attempt cannot produce a token. The queue and
+     * the local data are kept, so signing in again lets the queued changes leave.
+     *
+     * Reported here as well as through [ScopeState.AuthRequired] because the two are read in
+     * different places: the scope's state is what a shell observes, and this is what a screen bound
+     * to one collection has in its hand when it has to say why nothing is moving.
+     *
+     * @property message Description reported by the server.
+     */
+    public data class AuthRequired(
+        override val message: String,
+    ) : SyncFailure()
+
+    /**
+     * Access to the scope has been taken away.
+     *
+     * Terminal: there is nobody left to accept the queued changes, and the scope's local data is
+     * wiped. Distinguished from [AuthRequired] because signing in again does not help.
+     *
+     * @property message Description reported by the server.
+     */
+    public data class Revoked(
+        override val message: String,
+    ) : SyncFailure()
+
+    /**
      * The application's adapter or database failed while the library was applying a change.
      *
      * The transaction was rolled back, so the local state is consistent, but the failure is not
      * transient: the same data will fail again until the application is fixed.
      *
      * @property message Description of the local failure.
+     * @property cause Throwable the adapter or the database threw. The library cannot say anything
+     *   useful about a fault in code it does not own, so it carries the one thing that can: a
+     *   message alone turns a `NullPointerException` with a stack into the word "null".
      */
     public data class Local(
         override val message: String,
+        public val cause: Throwable? = null,
     ) : SyncFailure()
 }

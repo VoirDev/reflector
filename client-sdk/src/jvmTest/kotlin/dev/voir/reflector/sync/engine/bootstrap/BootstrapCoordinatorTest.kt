@@ -2,6 +2,8 @@ package dev.voir.reflector.sync.engine.bootstrap
 
 import dev.voir.reflector.sync.core.SyncPhase
 import dev.voir.reflector.sync.core.adapter.RemoteOp
+import dev.voir.reflector.sync.core.log.RecordingSyncLog
+import dev.voir.reflector.sync.core.log.SyncLogger
 import dev.voir.reflector.sync.core.transport.SyncTransportFailure
 import dev.voir.reflector.sync.engine.FakeAdapter
 import dev.voir.reflector.sync.engine.FakeTransport
@@ -36,6 +38,10 @@ import kotlin.uuid.Uuid
 class BootstrapCoordinatorTest {
     private val scope = ScopeId("user-1")
     private val collection = CollectionId("ledger")
+
+    /** Sink the coordinator's own account of what it did goes to, so a test can read it back. */
+    private val logs = RecordingSyncLog()
+    private val log = SyncLogger(logs, scope, collection)
     private val wallet = EntityType("wallet")
 
     private val database = openTestDatabase()
@@ -50,7 +56,7 @@ class BootstrapCoordinatorTest {
 
     private val metrics = RecordingMetrics()
 
-    private val mutations = MutationCoordinator(stores, transactions) { GroupId(uuids()) }
+    private val mutations = MutationCoordinator(stores, transactions, log) { GroupId(uuids()) }
 
     private val coordinator =
         BootstrapCoordinator(
@@ -62,6 +68,7 @@ class BootstrapCoordinatorTest {
             adapter = adapter,
             limits = transport.limits,
             metrics = metrics,
+            log = log,
             clock = clock,
             newUuid = uuids,
         )

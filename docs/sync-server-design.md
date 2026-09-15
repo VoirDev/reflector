@@ -415,6 +415,14 @@ fun interface SyncMetrics {
 }                                        // CursorRefused | HistoryTrimmed
 ```
 
+```kotlin
+/** The same guarantees; the level is the host's, answered from its own logging framework. */
+fun interface SyncLog {
+    fun log(record: SyncLogRecord)                 // level, event, message, context, cause
+    fun isEnabled(level, source): Boolean = true   // asked before a record is built
+}
+```
+
 The split is fundamental. `SyncCommitListener` is a notification for the WebSocket channel and
 must be **after** the commit: a delivery failure must not roll back data that has already been
 accepted, and in the worst case the client learns about the change from its timer.
@@ -462,6 +470,44 @@ Like the commit listener, it is called after the work is durable and never insid
 that did it, and a failure in it is swallowed: a metric must not be able to undo a batch the
 database has accepted.
 
+`SyncLog` is the fourth, and it answers what the other three cannot. Metrics say how a deployment is
+doing and are built to be aggregated; a log says what happened to one request, in order, and is
+meant to be read. The module has one failure that is invisible in every other channel: a host commit
+listener that throws leaves the batch durable and the notification undelivered, so every client of
+that scope falls back on its own poll — synchronisation that looks slow rather than broken. The
+listener's own contract has always said such errors "are logged and ignored", and until this port
+existed there was nothing to log them to.
+
+A port and not SLF4J, even though this module is JVM-only and SLF4J is the universal facade there.
+The module's near-absence of dependencies is a property worth keeping, and the adapter is about ten
+lines — `samples/ledger-server` has it as `Slf4jSyncLog`, alongside the `logback.xml` that
+demonstrates what it buys.
+
+**`isEnabled(level, source)` is where the level lives, and that is the point of the port.** An
+adapter answers it from the host's own framework, so what the module says is configured wherever
+every other level in the host is configured, at runtime and per area:
+
+```xml
+<logger name="dev.voir.reflector.sync" level="INFO"/>
+<logger name="dev.voir.reflector.sync.push" level="DEBUG"/>
+```
+
+Per area matters on a server. Turning one level up for everything is not practical when the read
+paths outnumber the writes by orders of magnitude and would bury them; being able to follow every
+group the module applies while `changes` and `snapshot` stay quiet is the difference between a
+usable investigation and a full disk.
+
+Two things it reports deserve naming. `LOCK_HELD_LONG` fires when the counter lock was held past a
+deliberately generous threshold — the same serialisation `PushGroupServed` measures, said in words
+to somebody reading a log rather than a dashboard. And `GROUP_REPEATED` reports a group answered
+from its stored result: idempotency working exactly as designed, invisible otherwise, and the
+hardest thing to understand from the client's side, where it looks like a server replying about
+content that was never sent.
+
+Its records carry no stored document, at any level. The module holds its users' business data as
+opaque `jsonb`; server logs are shipped to aggregators, retained for months, and read by people who
+were never granted the scope.
+
 ## 12. Configuration and registration
 
 ```kotlin
@@ -506,11 +552,16 @@ is updated together with the version of the dependency.
 - the primary key's name is set by the migration: `UuidTable` declares its own and does not
   allow it to be overridden.
 
-**There are no DAO entities in the module — a deliberate departure from the handbook.** The
-handbook requires a DAO entity per table, but here every operation is set-based: locking the
+**There are no DAO entities in the module.** Every operation here is set-based: locking the
 counter, a conditional update by version, batch inserts, keyset pagination, deletion by range.
-Five DAO classes would be dead code, which the handbook forbids elsewhere. The conflict is
-resolved in favour of the DSL.
+Five DAO classes would be dead code, and none of them would make any of that clearer.
+
+This used to be recorded as a deliberate departure, because the handbook of the day asked for a DAO
+entity per table. It is no longer a departure: the `exposed-v1-5` skill asks for a DAO entity only
+where entity navigation, dirty tracking or row lifecycle makes a use case clearer, and for the DSL
+otherwise — which is what this module does. The note is kept rather than deleted because the
+reasoning is the same either way, and because a reader comparing this file against an older revision
+of the standard should find the question already answered.
 
 Every column holding a `kotlin.time.Instant` is declared as `TIMESTAMPTZ`.
 

@@ -63,6 +63,20 @@ internal class GroupStore(
     ): PendingGroup? = dao.head(scope.value, collection.value)?.toPendingGroup()
 
     /**
+     * Returns the whole queue of a collection, oldest first.
+     *
+     * For diagnostics: the engine itself only ever looks at the head.
+     *
+     * @param scope Scope of the collection.
+     * @param collection Identifier of the collection.
+     * @return Every queued group in the order they would leave in.
+     */
+    public suspend fun queue(
+        scope: ScopeId,
+        collection: CollectionId,
+    ): List<PendingGroup> = dao.ofCollection(scope.value, collection.value).map { it.toPendingGroup() }
+
+    /**
      * Returns the next pending group after a given position in the queue.
      *
      * @param scope Scope of the collection.
@@ -172,5 +186,6 @@ internal class GroupStore(
             attempts = attempts,
             nextRetryAt = nextRetryAt,
             dependencyMerges = dependencyMerges,
+            lastError = lastError,
         )
 }

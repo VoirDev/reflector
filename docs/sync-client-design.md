@@ -29,7 +29,7 @@ requires from the server. The companion document:
 | Conflicts nobody answers | Reported as a derived `NEEDS_ATTENTION` phase, never expired |
 | Local schema drift | An optional fingerprint per collection, and `requestResync()` by hand |
 | An oversized group | Detected locally before the envelope goes out; the application fixes it |
-| Diagnostics | A port into the application, with a closed set of events |
+| Diagnostics | Two ports into the application: numbers to aggregate, and a log to read |
 
 ## 2. The model
 
@@ -516,6 +516,19 @@ The engine itself does not distinguish trigger types — it always simply synchr
 distinction is for diagnostics and for the application, which decides which of them it is even
 able to produce.
 
+**What a failure says is what the library knows, not less.** `SyncFailure` distinguishes the cases
+by what the application can do about them, and it earns that only if it keeps what it was told.
+`Network` and `Local` carry the throwable — the description of a fault in code this library does
+not own is worth little without the stack that produced it — and the failures the protocol names
+(refused credentials, a revoked scope) are reported as themselves. The mapping from
+`SyncTransportFailure` is exhaustive rather than falling back on a catch-all, which is what had
+been reporting three of them as a server error with the status code zero.
+
+A permanent refusal reaches the application twice on purpose: through `CollectionAdapter.onRejected`,
+which is a call it has to handle, and as the collection's `lastFailure`, which is what a screen
+bound to that collection reads. One without the other is how a blocked queue ends up published as a
+collection whose last attempt succeeded.
+
 **Authorisation.** The token comes from a port into the application:
 
 ```kotlin
@@ -619,6 +632,67 @@ Implementations are called on the collection's worker, never inside a transactio
 throw: a metric that could fail a synchronisation which already succeeded would be worse than no
 metric. A throw is swallowed, which is also why a broken sink reports nothing and says nothing.
 
+**Numbers are not an account of what happened, so there is a second port next to them.** Metrics
+answer "how is the population doing" and are built to be aggregated; they cannot answer "why did
+this installation stop pushing on Tuesday", because the shape that makes them aggregable is exactly
+the shape that throws away the order and the particulars. `SyncLog` is that second port:
+
+```kotlin
+fun interface SyncLog {                            // implemented by the application, optional
+    fun log(record: SyncLogRecord)                 // level, event, message, context, cause
+    fun isEnabled(level, source): Boolean = true   // asked before a record is built
+}
+```
+
+A port and not a logging library, and here the reason is stronger than consistency with the others:
+the client is multiplatform, no logging framework spans the JVM, Android and iOS, and any library
+that picks one imposes it on every consumer and every target. The SDK ships `ConsoleSyncLog` for
+every platform and `AndroidSyncLog` for logcat, both of which depend on nothing, and the default
+sink discards.
+
+`isEnabled` is part of the contract rather than an optimisation. It is asked before a message is
+formatted or a context map is built, which is what makes it reasonable for the engine to describe
+every decision it takes; and because the answer comes from the application, the levels in effect are
+configured wherever that application configures every other level — externally, at runtime, and per
+`SyncLogSource`, so that the push side can be made verbose while the pull side, which is far louder
+on a busy collection, stays quiet.
+
+What it reports is chosen around this library's failure modes, which are slow rather than loud. The
+three that were previously invisible from outside are now stated: a queue whose head is conflicted
+or refused is reported **once, when it becomes stuck** rather than on every timer tick, because the
+transition is the event and the state can last for weeks; every entry into `RESYNC_REQUIRED` names
+which of its four unrelated causes it was — a stale cursor, an unknown operation code, a changed
+schema fingerprint, or the server asking — so that an unexplained bootstrap is attributable; and a
+socket that reconnects forever, which is correct behaviour and looks identical to one that has never
+connected, says which of the two it is.
+
+**A log answers what happened; a snapshot answers what is true now.** `CollectionHandle.state` is
+built for a user interface — four values, cheap enough to change many times a second — and it is
+deliberately not where a developer looks when that interface has been saying "3 changes waiting" for
+an hour. `diagnostics()` is: the queue itself, oldest first, with each group's state, its attempts,
+its backoff and the error its last attempt was refused with, alongside the cursor, the generation,
+the schema fingerprint and when a pull or a push last succeeded.
+
+Almost all of it was already being written and none of it could be read. The collection's row has
+carried `last_error` and `failure_count` from the beginning, and every group row its own
+`last_error` and attempt count; nothing ever queried them, so the durable record of why a client
+stopped was reachable only by opening the database file. That is the half of the problem a log does
+not solve: `lastFailure` is deliberately in-memory, because a failure from a past process is history
+— but a queue blocked since last Tuesday is precisely the case where nobody was watching when it
+happened.
+
+`isQueueBlocked` is on the snapshot rather than left to the caller because the distinction is easy
+to get wrong and is the one that matters: a head serving a backoff is waiting and needs nobody,
+while a head that is conflicted or refused has stopped and needs the application. Reporting the
+first as stuck would make the signal useless for the second.
+
+**No record carries an entity's document, at any level.** The library sends the application's
+business data to the server and a diagnostic channel is the wrong place for it to reappear: a debug
+build with a remote sink would export it, and debug logs are pasted into bug reports. Documents are
+described by entity type, identifier, version and size. The HTTP tracing the SDK can install obeys
+the same rule by construction — `SyncHttpTracing` has no entry for bodies — and it redacts
+`Authorization` before writing a header.
+
 ## 10. The public API
 
 Implemented in the `dev.voir.reflector.sync.core` package of `client-sdk`. The identifiers (`ScopeId`, `CollectionId`,
@@ -639,6 +713,7 @@ interface ScopeHandle {
 
 interface CollectionHandle {
     val state: StateFlow<CollectionSyncState>  // phase, pendingCount, conflictCount, lastFailure
+    suspend fun diagnostics(): CollectionDiagnostics   // the queue, the errors, the cursor — durable
                                                // phase: NEW | BOOTSTRAPPING | LIVE |
                                                //        NEEDS_ATTENTION | RESYNC_REQUIRED
     val conflicts: Flow<List<Conflict>>        // only what the adapter did not resolve itself

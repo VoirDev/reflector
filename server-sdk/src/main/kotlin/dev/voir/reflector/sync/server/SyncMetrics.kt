@@ -41,7 +41,16 @@ public fun interface SyncMetrics {
  * its metrics rather than a committed batch.
  *
  * @param event Event to report.
+ * @param log Sink told when the host's implementation throws.
  */
-internal fun SyncMetrics.emit(event: SyncMetricEvent) {
+internal fun SyncMetrics.emit(
+    event: SyncMetricEvent,
+    log: SyncLogger,
+) {
     runCatching { record(event) }
+        .onFailure { failure ->
+            log.warn(SyncLogEvent.METRICS_SINK_FAILED, failure) {
+                "the metrics sink threw on ${event::class.simpleName}; the measurement is lost"
+            }
+        }
 }

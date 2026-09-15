@@ -6,6 +6,9 @@ import dev.voir.reflector.sync.core.ScopeHandle
 import dev.voir.reflector.sync.core.ScopeState
 import dev.voir.reflector.sync.core.SyncPhase
 import dev.voir.reflector.sync.core.adapter.CollectionAdapter
+import dev.voir.reflector.sync.core.log.SyncLog
+import dev.voir.reflector.sync.core.log.SyncLogEvent
+import dev.voir.reflector.sync.core.log.SyncLogger
 import dev.voir.reflector.sync.core.metrics.SyncMetrics
 import dev.voir.reflector.sync.core.transport.SyncChannelSignal
 import dev.voir.reflector.sync.core.transport.SyncEventChannel
@@ -49,6 +52,7 @@ import kotlin.uuid.Uuid
  * @param conflictThreshold Number of open conflicts at which a collection of this scope reports
  *   that it needs the application's attention.
  * @param metrics Sink the workers of this scope report their measurements through.
+ * @param log Sink the workers of this scope describe their decisions through.
  * @param coroutineScope Scope the workers run in.
  * @param clock Source of local time, used for backoff and diagnostics only.
  * @param newUuid Source of identifiers; injected so that tests can make them predictable.
@@ -63,10 +67,12 @@ internal class DefaultScopeHandle(
     private val triggerSources: List<SyncTriggerSource>,
     private val conflictThreshold: ConflictThreshold,
     private val metrics: SyncMetrics,
+    private val log: SyncLog,
     private val coroutineScope: CoroutineScope,
     private val clock: Clock,
     private val newUuid: () -> Uuid,
 ) : ScopeHandle {
+    private val logger = SyncLogger(log, scopeId)
     private val mutableState = MutableStateFlow<ScopeState>(ScopeState.Online)
     private val handles = mutableMapOf<CollectionId, CollectionHandle>()
     private val workersByCollection = mutableMapOf<CollectionId, CollectionWorker>()
@@ -80,6 +86,21 @@ internal class DefaultScopeHandle(
     override val state: StateFlow<ScopeState> = mutableState.asStateFlow()
 
     init {
+        // Every collection's worker can move this, so it is reported from the one place that sees
+        // all of them rather than from each of the several that write it. Scope state is what says
+        // whether anything can make progress at all, so a transition is always worth a line.
+        workerScope.launch {
+            var previous = mutableState.value
+            mutableState.collect { current ->
+                if (current != previous) {
+                    logger.info(
+                        SyncLogEvent.SCOPE_STATE_CHANGED,
+                        context = { mapOf("from" to previous.describe(), "to" to current.describe()) },
+                    ) { current.explain() }
+                    previous = current
+                }
+            }
+        }
         eventChannel?.let { channel -> workerScope.launch { listen(channel) } }
         triggerSources.forEach { source ->
             workerScope.launch {
@@ -106,6 +127,7 @@ internal class DefaultScopeHandle(
                     adapter = adapter,
                     scopeState = mutableState,
                     metrics = metrics,
+                    log = logger.forCollection(id),
                     coroutineScope = workerScope,
                     clock = clock,
                     newUuid = newUuid,
@@ -118,8 +140,18 @@ internal class DefaultScopeHandle(
                 collection = id,
                 stores = stores,
                 transactions = transactions,
-                mutations = MutationCoordinator(stores, transactions) { GroupId(newUuid()) },
-                conflictCoordinator = ConflictCoordinator(scopeId, id, stores, transactions, adapter, newUuid),
+                mutations =
+                    MutationCoordinator(stores, transactions, logger.forCollection(id)) { GroupId(newUuid()) },
+                conflictCoordinator =
+                    ConflictCoordinator(
+                        scopeId,
+                        id,
+                        stores,
+                        transactions,
+                        adapter,
+                        logger.forCollection(id),
+                        newUuid,
+                    ),
                 worker = worker,
                 conflictThreshold = conflictThreshold,
                 coroutineScope = coroutineScope,
@@ -149,12 +181,21 @@ internal class DefaultScopeHandle(
     }
 
     private suspend fun handle(event: SyncEvent) {
+        logger.debug(
+            SyncLogEvent.CHANNEL_EVENT_RECEIVED,
+            context = { mapOf("event" to event::class.simpleName.orEmpty()) },
+        ) { "the server sent a notification" }
         when (event) {
             is SyncEvent.Invalidate -> {
                 workersByCollection[event.collection]?.requestSync()
             }
 
             is SyncEvent.Resync -> {
+                logger
+                    .forCollection(event.collection)
+                    .info(SyncLogEvent.RESYNC_REQUIRED, context = { mapOf("reason" to "server-asked") }) {
+                        "the server says this collection can no longer be followed incrementally"
+                    }
                 // The server says the collection cannot be followed incrementally any more. The phase
                 // is written down rather than acted on here: the worker owns the order of things, and
                 // a bootstrap started from under it would race with whatever it is doing.
@@ -176,6 +217,36 @@ internal class DefaultScopeHandle(
         }
     }
 
+    private fun ScopeState.describe(): String = this::class.simpleName.orEmpty()
+
+    /**
+     * Explains what a scope state means for the application, for the line that reports reaching it.
+     *
+     * The four states differ in who has to act, which is the only thing worth saying about them
+     * here: nobody, the user, or nobody ever again.
+     *
+     * @return One sentence describing the consequence of being in this state.
+     */
+    private fun ScopeState.explain(): String =
+        when (this) {
+            ScopeState.Online -> {
+                "the scope is connected and its workers may push and pull"
+            }
+
+            ScopeState.Offline -> {
+                "the server cannot be reached; local changes keep queueing, which is normal"
+            }
+
+            ScopeState.AuthRequired -> {
+                "the credentials were refused and could not be renewed; the workers stop and the queue is kept " +
+                    "until the user signs in again"
+            }
+
+            ScopeState.Revoked -> {
+                "access to the scope has been revoked; its local data is wiped"
+            }
+        }
+
     /** Number of local changes across every opened collection of the scope. */
     suspend fun pendingCount(): Int =
         transactions.transaction {
@@ -190,6 +261,7 @@ internal class DefaultScopeHandle(
      */
     suspend fun wipe() {
         workers.cancelAndJoin()
+        logger.debug(SyncLogEvent.SCOPE_WIPED) { "the workers have stopped; removing the scope's local data" }
         transactions.transaction {
             adapters.keys.forEach { collection -> stores.inbox.clear(scopeId, collection) }
             stores.records.deleteScope(scopeId)

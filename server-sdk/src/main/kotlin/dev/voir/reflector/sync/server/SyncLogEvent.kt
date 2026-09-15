@@ -1,0 +1,84 @@
+package dev.voir.reflector.sync.server
+
+/**
+ * What a record is about, as a closed set.
+ *
+ * A name rather than a formatted sentence, because a sentence is for a person reading one server's
+ * log and a name is for everything else: filtering a sink, counting occurrences across a fleet, or
+ * finding every line about the same decision. The prose lives in [SyncLogRecord.message] and may be
+ * reworded; these entries are the part worth matching on and are treated as stable.
+ *
+ * Each entry carries the [source] it can only come from, which is what lets an adapter route
+ * records to a per-area logger without the module naming loggers itself.
+ *
+ * @property source Part of the module that reports this event.
+ */
+public enum class SyncLogEvent(
+    public val source: SyncLogSource,
+) {
+    /** The module was assembled, with the collections and limits it serves. */
+    MODULE_CREATED(SyncLogSource.MODULE),
+
+    /** The module's schema was brought up to date. */
+    MIGRATIONS_APPLIED(SyncLogSource.MODULE),
+
+    /**
+     * A host commit listener threw after a batch was committed.
+     *
+     * The data is durable and stays so — that is what the listener firing after the transaction is
+     * for. What is lost is the notification, so clients of that scope learn about the change on
+     * their next poll instead of at once. Invisible anywhere else, and slow rather than loud, which
+     * is exactly the kind of failure this module has to report rather than swallow.
+     */
+    COMMIT_LISTENER_FAILED(SyncLogSource.MODULE),
+
+    /** A host metrics sink threw, so that measurement was lost and nothing else was. */
+    METRICS_SINK_FAILED(SyncLogSource.MODULE),
+
+    /** A group was written and a sequence consumed. */
+    GROUP_APPLIED(SyncLogSource.PUSH),
+
+    /** A group was refused because entities in it had moved on; nothing was written. */
+    GROUP_CONFLICTED(SyncLogSource.PUSH),
+
+    /** A group was refused for a reason the client cannot retry its way out of. */
+    GROUP_REJECTED(SyncLogSource.PUSH),
+
+    /**
+     * A group arrived whose answer the module had already stored, and was answered from it.
+     *
+     * Idempotency working as designed. Worth a line because it is otherwise invisible and is deeply
+     * confusing to debug from the client's side: the client believes it is sending new content, and
+     * the server is replying about content it sent before.
+     */
+    GROUP_REPEATED(SyncLogSource.PUSH),
+
+    /**
+     * The per-collection counter lock was held longer than a write ought to take.
+     *
+     * Writers into one collection are serialised by that lock, deliberately, and it is the only
+     * thing keeping the change log free of gaps. It is invisible until it is a queue. This is the
+     * line that says the day has arrived.
+     */
+    LOCK_HELD_LONG(SyncLogSource.PUSH),
+
+    /** A page of the change log was served. */
+    CHANGES_SERVED(SyncLogSource.CHANGES),
+
+    /**
+     * A client's cursor was refused because the history behind it is gone.
+     *
+     * Each of these is a whole-collection snapshot transfer that is about to happen. A few are a
+     * fact of life; many mean the retention window is too short for the population.
+     */
+    CURSOR_REFUSED(SyncLogSource.CHANGES),
+
+    /** A page of a snapshot was served to a client rebuilding a collection. */
+    SNAPSHOT_SERVED(SyncLogSource.SNAPSHOT),
+
+    /** A page token arrived that this module did not produce, or can no longer parse. */
+    PAGE_TOKEN_INVALID(SyncLogSource.SNAPSHOT),
+
+    /** Retention trimming finished for one collection. */
+    HISTORY_TRIMMED(SyncLogSource.MAINTENANCE),
+}

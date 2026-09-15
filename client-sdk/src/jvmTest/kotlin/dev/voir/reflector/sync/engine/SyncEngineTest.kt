@@ -3,18 +3,25 @@ package dev.voir.reflector.sync.engine
 import dev.voir.reflector.sync.core.CollectionSyncState
 import dev.voir.reflector.sync.core.ConflictThreshold
 import dev.voir.reflector.sync.core.SyncEngine
+import dev.voir.reflector.sync.core.SyncFailure
 import dev.voir.reflector.sync.core.SyncPhase
 import dev.voir.reflector.sync.core.adapter.CollectionAdapter
 import dev.voir.reflector.sync.core.adapter.SchemaFingerprint
 import dev.voir.reflector.sync.core.conflict.Resolution
+import dev.voir.reflector.sync.core.log.RecordingSyncLog
+import dev.voir.reflector.sync.core.log.SyncLogEvent
+import dev.voir.reflector.sync.core.log.SyncLogLevel
+import dev.voir.reflector.sync.core.log.SyncLogRecord
 import dev.voir.reflector.sync.core.transport.SyncChannelSignal
 import dev.voir.reflector.sync.core.transport.SyncEventChannel
+import dev.voir.reflector.sync.core.transport.SyncTransportFailure
 import dev.voir.reflector.sync.core.trigger.ManualTriggerSource
 import dev.voir.reflector.sync.core.trigger.SyncTrigger
 import dev.voir.reflector.sync.core.trigger.SyncTriggerSource
 import dev.voir.reflector.sync.openTestDatabase
 import dev.voir.reflector.sync.persistence.RoomSyncTransactionRunner
 import dev.voir.reflector.sync.persistence.SyncStores
+import dev.voir.reflector.sync.persistence.group.PushGroupState
 import dev.voir.reflector.sync.protocol.BatchSeq
 import dev.voir.reflector.sync.protocol.CollectionId
 import dev.voir.reflector.sync.protocol.Cursor
@@ -22,12 +29,16 @@ import dev.voir.reflector.sync.protocol.EntityId
 import dev.voir.reflector.sync.protocol.EntityType
 import dev.voir.reflector.sync.protocol.EntityVersion
 import dev.voir.reflector.sync.protocol.ScopeId
+import dev.voir.reflector.sync.protocol.changes.ChangeBatch
 import dev.voir.reflector.sync.protocol.changes.ChangesPage
+import dev.voir.reflector.sync.protocol.changes.RemoteOperation
 import dev.voir.reflector.sync.protocol.events.SyncEvent
 import dev.voir.reflector.sync.protocol.push.AppliedVersion
 import dev.voir.reflector.sync.protocol.push.ConflictEntry
 import dev.voir.reflector.sync.protocol.push.PushGroupResult
 import dev.voir.reflector.sync.protocol.push.PushResponse
+import dev.voir.reflector.sync.protocol.push.RejectCode
+import dev.voir.reflector.sync.protocol.push.RejectError
 import dev.voir.reflector.sync.protocol.snapshot.SnapshotPage
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -45,6 +56,8 @@ import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
+import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertSame
@@ -100,6 +113,34 @@ class SyncEngineTest {
         assertNotNull(reached, diagnosis)
     }
 
+    /** Cycles the engine has reported finishing, which is how a test waits for one to happen. */
+    private fun cyclesFinished(): Int = logs.records.value.count { it.event == SyncLogEvent.CYCLE_FINISHED }
+
+    /**
+     * Waits until the engine has reported a record matching [predicate].
+     *
+     * @param description What was being waited for, for the failure message.
+     * @param predicate Record the test is waiting for.
+     */
+    private suspend fun awaitRecord(
+        description: String,
+        predicate: (SyncLogRecord) -> Boolean,
+    ): Unit = awaitRecords(description) { logs.records.value.any(predicate) }
+
+    /**
+     * Waits until [condition] holds of everything reported so far.
+     *
+     * @param description What was being waited for, for the failure message.
+     * @param condition Condition over the records collected up to now.
+     */
+    private suspend fun awaitRecords(
+        description: String,
+        condition: () -> Boolean,
+    ) {
+        val reached = withTimeoutOrNull(AWAIT_TIMEOUT_MILLIS) { logs.records.first { condition() } }
+        assertNotNull(reached, "never reached $description; reported=" + logs.records.value.map { it.event })
+    }
+
     private var snapshots = 0
 
     private fun emptySnapshot(): SnapshotPage {
@@ -123,7 +164,11 @@ class SyncEngineTest {
             eventChannel = eventChannel,
             triggerSources = triggerSources,
             conflictThreshold = conflictThreshold,
+            log = logs,
         )
+
+    /** Everything the engine said while a test ran, so that a test can assert on what it reported. */
+    private val logs = RecordingSyncLog()
 
     @Test
     fun `a local change reaches the server through the public API`() =
@@ -165,6 +210,174 @@ class SyncEngineTest {
             assertEquals(walletId, sent.id)
             val record = assertNotNull(stores.records.find(scopeId, ledger, wallet, walletId))
             assertEquals(EntityVersion("42"), record.serverVersion)
+        }
+
+    @Test
+    fun `a refused group is explained by diagnostics, and the explanation survives a restart`() =
+        runBlocking<Unit> {
+            transport.onSnapshot = { emptySnapshot() }
+            transport.onPush = { request ->
+                PushResponse(
+                    results =
+                        listOf(
+                            PushGroupResult.Rejected(
+                                groupId = request.groups.single().groupId,
+                                error =
+                                    RejectError(
+                                        code = RejectCode.VALIDATION,
+                                        entity = wallet,
+                                        id = walletId,
+                                        message = "currency is required",
+                                    ),
+                            ),
+                        ),
+                    latestSeq = BatchSeq("1"),
+                )
+            }
+            val collection = engine(workers).scope(scopeId).collection(ledger)
+            collection.mutate {
+                adapter.bodies[wallet to walletId] = buildJsonObject { put("title", "Cash") }
+                markUpserted(wallet, walletId)
+            }
+            awaitRecord("the refusal") { it.event == SyncLogEvent.PUSH_REJECTED }
+
+            val diagnostics = collection.diagnostics()
+            assertTrue(diagnostics.isQueueBlocked, "a refused head stops everything behind it")
+            val head = diagnostics.queue.first()
+            assertEquals(PushGroupState.FAILED, head.state)
+            assertEquals(1, head.operations)
+            assertEquals("currency is required", head.lastError, "the sentence that says what has to change")
+            assertEquals(SyncPhase.LIVE, diagnostics.phase, "a blocked queue does not change the phase")
+
+            // The part that a published `lastFailure` cannot do: the queue has been stuck since
+            // before this process started, which is the case where nobody was watching when it
+            // happened. A second engine over the same database is that restart.
+            val afterRestart = engine(workers).scope(scopeId).collection(ledger)
+            assertNull(afterRestart.state.value.lastFailure, "an in-memory failure does not survive a restart")
+            val restored = afterRestart.diagnostics()
+            assertEquals("currency is required", restored.queue.first().lastError)
+            assertEquals(head.groupId, restored.queue.first().groupId)
+        }
+
+    @Test
+    fun `a queue serving a backoff is not reported as blocked`() =
+        runBlocking<Unit> {
+            transport.onSnapshot = { emptySnapshot() }
+            transport.onPush = { throw SyncTransportFailure.Unreachable("offline") }
+            val collection = engine(workers).scope(scopeId).collection(ledger)
+            collection.mutate {
+                adapter.bodies[wallet to walletId] = buildJsonObject { put("title", "Cash") }
+                markUpserted(wallet, walletId)
+            }
+            awaitRecord("the scheduled retry") { it.event == SyncLogEvent.RETRY_SCHEDULED }
+
+            // The distinction the property exists for: this queue is waiting, not stopped. Nobody
+            // has to do anything about it, and reporting it as stuck would make the signal useless
+            // for the case that does need somebody.
+            val diagnostics = collection.diagnostics()
+            assertFalse(diagnostics.isQueueBlocked, "a backoff is a wait, not a stall")
+            val head = diagnostics.queue.first()
+            assertEquals(PushGroupState.PENDING, head.state)
+            assertEquals(1, head.attempts)
+            assertNotNull(head.nextRetryAt)
+        }
+
+    @Test
+    fun `refused credentials are reported as needing the user, not as a server error`() =
+        runBlocking<Unit> {
+            transport.onSnapshot = { throw SyncTransportFailure.Unauthorized("the token has expired") }
+            val collection = engine(workers).scope(scopeId).collection(ledger)
+
+            collection.requestSync()
+
+            // Previously this arrived as `Server(statusCode = 0)` — a status no server answers with,
+            // for the one failure the application is expected to act on.
+            collection.state.await("a failure the application can act on") { it.lastFailure != null }
+            val failure = assertIs<SyncFailure.AuthRequired>(collection.state.value.lastFailure)
+            assertEquals("the token has expired", failure.message)
+        }
+
+    @Test
+    fun `a fault in the application's own code arrives with the throwable that caused it`() =
+        runBlocking<Unit> {
+            transport.onSnapshot = { emptySnapshot() }
+            adapter.beforeApply = { throw IllegalStateException("the ledger dao is not open") }
+            transport.onChanges = {
+                ChangesPage(
+                    batches =
+                        listOf(
+                            ChangeBatch(
+                                seq = BatchSeq("1"),
+                                originClientId = null,
+                                ops =
+                                    listOf(
+                                        RemoteOperation.Upsert(
+                                            entity = wallet,
+                                            id = walletId,
+                                            version = EntityVersion("1"),
+                                            data = buildJsonObject { put("title", "Cash") },
+                                        ),
+                                    ),
+                            ),
+                        ),
+                    nextCursor = Cursor("1"),
+                    hasMore = false,
+                )
+            }
+            val collection = engine(workers).scope(scopeId).collection(ledger)
+
+            collection.requestSync()
+
+            // A description of a fault in code this library does not own is worth very little: the
+            // stack is the whole of what makes it actionable, and it used to be discarded. The
+            // instance is not asserted on, because coroutine stack-trace recovery hands on a copy
+            // carrying the original as its own cause; what matters is that a throwable arrives.
+            collection.state.await("the local failure") { it.lastFailure is SyncFailure.Local }
+            val failure = assertIs<SyncFailure.Local>(collection.state.value.lastFailure)
+            val cause = assertIs<IllegalStateException>(failure.cause)
+            assertEquals("the ledger dao is not open", cause.message)
+            assertTrue(cause.stackTrace.isNotEmpty(), "the stack is the whole point of carrying it")
+        }
+
+    @Test
+    fun `a queue blocked on a refusal is reported when it becomes stuck and not on every cycle`() =
+        runBlocking<Unit> {
+            transport.onSnapshot = { emptySnapshot() }
+            transport.onPush = { request ->
+                PushResponse(
+                    results =
+                        listOf(
+                            PushGroupResult.Rejected(
+                                groupId = request.groups.single().groupId,
+                                error = RejectError(code = RejectCode.VALIDATION, message = "currency is required"),
+                            ),
+                        ),
+                    latestSeq = BatchSeq("1"),
+                )
+            }
+            val collection = engine(workers).scope(scopeId).collection(ledger)
+
+            collection.mutate {
+                adapter.bodies[wallet to walletId] = buildJsonObject { put("title", "Cash") }
+                markUpserted(wallet, walletId)
+            }
+            awaitRecord("the queue reported as blocked") { it.event == SyncLogEvent.QUEUE_BLOCKED }
+
+            // Every later cycle finds the same refused group at the head and takes the same decision.
+            // Saying so each time would bury the transition under a line per timer tick, for as long
+            // as the application leaves the data unfixed — which can be weeks. Each cycle is waited
+            // for rather than merely requested: the request channel is conflated, so firing three in
+            // a row could collapse into one and prove nothing.
+            repeat(TRAILING_CYCLES) {
+                val before = cyclesFinished()
+                collection.requestSync()
+                awaitRecords("a further cycle to finish") { cyclesFinished() > before }
+            }
+
+            val blocked = logs.records.value.filter { it.event == SyncLogEvent.QUEUE_BLOCKED }
+            assertEquals(1, blocked.size, "the transition is the event, not the state")
+            assertEquals(SyncLogLevel.WARN, blocked.single().level)
+            assertEquals(PushGroupState.FAILED.name, blocked.single().context["head"])
         }
 
     @Test
@@ -327,6 +540,9 @@ class SyncEngineTest {
     private companion object {
         /** Long enough for a local push, short enough that a stuck engine fails instead of hanging. */
         const val AWAIT_TIMEOUT_MILLIS = 10_000L
+
+        /** Extra cycles run over an already-stuck queue, to prove the report does not repeat. */
+        const val TRAILING_CYCLES = 3
 
         /** How often a test looks at a counter it cannot observe as a flow. */
         const val POLL_MILLIS = 20L

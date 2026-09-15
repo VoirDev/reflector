@@ -2,6 +2,8 @@ package dev.voir.reflector.sync.engine.conflict
 
 import dev.voir.reflector.sync.core.conflict.ConflictId
 import dev.voir.reflector.sync.core.conflict.Resolution
+import dev.voir.reflector.sync.core.log.RecordingSyncLog
+import dev.voir.reflector.sync.core.log.SyncLogger
 import dev.voir.reflector.sync.core.metrics.SyncMetrics
 import dev.voir.reflector.sync.engine.FakeAdapter
 import dev.voir.reflector.sync.engine.FakeTransport
@@ -41,6 +43,10 @@ import kotlin.uuid.Uuid
 class ConflictCoordinatorTest {
     private val scope = ScopeId("user-1")
     private val collection = CollectionId("ledger")
+
+    /** Sink the coordinator's own account of what it did goes to, so a test can read it back. */
+    private val logs = RecordingSyncLog()
+    private val log = SyncLogger(logs, scope, collection)
     private val wallet = EntityType("wallet")
 
     private val database = openTestDatabase()
@@ -53,7 +59,7 @@ class ConflictCoordinatorTest {
     private var generated = 0
     private val uuids = { Uuid.parse("00000000-0000-7000-8000-%012d".format(++generated)) }
 
-    private val mutations = MutationCoordinator(stores, transactions) { GroupId(uuids()) }
+    private val mutations = MutationCoordinator(stores, transactions, log) { GroupId(uuids()) }
 
     private val push =
         PushCoordinator(
@@ -67,11 +73,12 @@ class ConflictCoordinatorTest {
             limits = transport.limits,
             backoff = BackoffPolicy(random = Random(1)),
             metrics = SyncMetrics.None,
+            log = log,
             clock = clock,
             newUuid = uuids,
         )
 
-    private val coordinator = ConflictCoordinator(scope, collection, stores, transactions, adapter, uuids)
+    private val coordinator = ConflictCoordinator(scope, collection, stores, transactions, adapter, log, uuids)
 
     private fun entity(index: Int): EntityId = EntityId(Uuid.parse("00000000-0000-7000-8000-1%011d".format(index)))
 

@@ -1,5 +1,7 @@
 package dev.voir.reflector.sync.engine.mutation
 
+import dev.voir.reflector.sync.core.log.RecordingSyncLog
+import dev.voir.reflector.sync.core.log.SyncLogger
 import dev.voir.reflector.sync.openTestDatabase
 import dev.voir.reflector.sync.persistence.RoomSyncTransactionRunner
 import dev.voir.reflector.sync.persistence.SyncStores
@@ -22,6 +24,10 @@ import kotlin.uuid.Uuid
 class MutationCoordinatorTest {
     private val scope = ScopeId("user-1")
     private val collection = CollectionId("ledger")
+
+    /** Sink the coordinator's own account of what it did goes to, so a test can read it back. */
+    private val logs = RecordingSyncLog()
+    private val log = SyncLogger(logs, scope, collection)
     private val wallet = EntityType("wallet")
 
     private val database = openTestDatabase()
@@ -30,7 +36,7 @@ class MutationCoordinatorTest {
 
     private var nextGroup = 0
     private val coordinator =
-        MutationCoordinator(stores, transactions) {
+        MutationCoordinator(stores, transactions, log) {
             nextGroup++
             GroupId(Uuid.parse("00000000-0000-7000-8000-%012d".format(nextGroup)))
         }

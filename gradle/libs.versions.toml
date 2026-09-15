@@ -26,6 +26,9 @@ androidxWork = "2.10.1"
 
 exposed = "1.5.0"
 flyway = "13.5.0"
+# The reference host's logging backend. Nothing in server-sdk depends on it: the module reports
+# through its own SyncLog port, and this is what the sample's ten-line adapter writes into.
+logback = "1.5.20"
 postgresql = "42.7.13"
 hikari = "7.1.0"
 
@@ -75,9 +78,10 @@ androidx-work-runtime = { module = "androidx.work:work-runtime-ktx", version.ref
 exposed-bom = { module = "org.jetbrains.exposed:exposed-bom", version.ref = "exposed" }
 exposed-core = { module = "org.jetbrains.exposed:exposed-core" }
 exposed-jdbc = { module = "org.jetbrains.exposed:exposed-jdbc" }
-exposed-dao = { module = "org.jetbrains.exposed:exposed-dao" }
 exposed-kotlinDatetime = { module = "org.jetbrains.exposed:exposed-kotlin-datetime" }
 exposed-json = { module = "org.jetbrains.exposed:exposed-json" }
+
+logback-classic = { module = "ch.qos.logback:logback-classic", version.ref = "logback" }
 
 flyway-core = { module = "org.flywaydb:flyway-core", version.ref = "flyway" }
 flyway-postgresql = { module = "org.flywaydb:flyway-database-postgresql", version.ref = "flyway" }

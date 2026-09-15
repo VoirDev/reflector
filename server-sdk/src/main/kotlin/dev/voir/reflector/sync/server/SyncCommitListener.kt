@@ -16,7 +16,10 @@ public fun interface SyncCommitListener {
     /**
      * Reports a committed batch.
      *
-     * Errors thrown here are logged and ignored; the data is already durable.
+     * Errors thrown here are reported to [SyncLog] and otherwise ignored; the data is already
+     * durable and stays so. What is lost is the notification, so clients of that scope learn about
+     * the change on their next poll instead of at once — a failure that is invisible everywhere
+     * else, which is why the module reports it rather than swallowing it.
      *
      * @param scope Scope the collection belongs to.
      * @param collection Collection that changed.

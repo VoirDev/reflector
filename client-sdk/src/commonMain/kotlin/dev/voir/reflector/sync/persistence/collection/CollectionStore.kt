@@ -8,6 +8,7 @@ import dev.voir.reflector.sync.protocol.PageToken
 import dev.voir.reflector.sync.protocol.ScopeId
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import kotlin.time.Instant
 
 /**
  * Typed access to the synchronisation state of collections.
@@ -236,5 +237,9 @@ internal class CollectionStore(
             schemaFingerprint = schemaFingerprint?.let(::SchemaFingerprint),
             failureCount = failureCount,
             lastError = lastError,
+            // Stored as epoch milliseconds because that is what SQLite has; handed on as an Instant
+            // because that is what the rest of the library and the application speak.
+            lastPullAt = lastPullAt?.let(Instant::fromEpochMilliseconds),
+            lastPushAt = lastPushAt?.let(Instant::fromEpochMilliseconds),
         )
 }

@@ -33,8 +33,11 @@ dependencies {
     api(platform(libs.exposed.bom))
     api(libs.exposed.jdbc)
 
+    // No `exposed-dao`: every operation here is set-based — locking the counter, a conditional
+    // update by version, batch inserts, keyset pagination, deletion by range — so the module holds
+    // no DAO entities and never did. `UuidTable` looks like it would need the artefact and does
+    // not: it lives in `exposed-core`, under the `dao.id` package.
     implementation(libs.exposed.core)
-    implementation(libs.exposed.dao)
     implementation(libs.exposed.kotlinDatetime)
     implementation(libs.exposed.json)
 

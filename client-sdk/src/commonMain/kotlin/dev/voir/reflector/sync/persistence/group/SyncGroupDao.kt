@@ -45,6 +45,26 @@ public interface SyncGroupDao {
     ): Long
 
     /**
+     * Returns the whole queue of a collection, oldest first.
+     *
+     * For diagnostics only — the engine works on the head and never on the queue as a whole. A
+     * collection that has stopped draining is explained by the head's state and by what the groups
+     * behind it are carrying, and neither is visible from the published state, which counts
+     * pending changes without saying what is holding them.
+     *
+     * @param scopeId Scope of the collection.
+     * @param collectionId Identifier of the collection.
+     * @return Every queued group in the order they would leave in.
+     */
+    @Query(
+        "SELECT * FROM sync_group WHERE scope_id = :scopeId AND collection_id = :collectionId ORDER BY ord",
+    )
+    public suspend fun ofCollection(
+        scopeId: String,
+        collectionId: String,
+    ): List<SyncGroupEntity>
+
+    /**
      * Returns the group at the head of the collection's queue, whatever state it is in.
      *
      * The state is deliberately not part of the predicate. Groups do not overtake each other: two

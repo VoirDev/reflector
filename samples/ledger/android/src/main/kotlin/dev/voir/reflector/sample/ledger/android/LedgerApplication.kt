@@ -2,6 +2,7 @@ package dev.voir.reflector.sample.ledger.android
 
 import android.app.Application
 import android.content.Context
+import android.content.pm.ApplicationInfo
 import android.net.ConnectivityManager
 import android.net.Network
 import android.util.Log
@@ -12,10 +13,13 @@ import dev.voir.reflector.sample.ledger.LedgerDatabase
 import dev.voir.reflector.sample.ledger.ledgerSync
 import dev.voir.reflector.sync.core.CollectionHandle
 import dev.voir.reflector.sync.core.TokenProvider
+import dev.voir.reflector.sync.core.log.AndroidSyncLog
+import dev.voir.reflector.sync.core.log.SyncLog
 import dev.voir.reflector.sync.core.trigger.ManualTriggerSource
 import dev.voir.reflector.sync.core.trigger.PeriodicTriggerSource
 import dev.voir.reflector.sync.core.trigger.SyncTrigger
 import dev.voir.reflector.sync.network.KtorSyncTransport
+import dev.voir.reflector.sync.network.SyncHttpTracing
 import dev.voir.reflector.sync.network.syncHttpClient
 import dev.voir.reflector.sync.protocol.ScopeId
 import io.ktor.client.engine.okhttp.OkHttp
@@ -57,6 +61,11 @@ class LedgerApplication : Application() {
     override fun onCreate() {
         super.onCreate()
 
+        // Switched on by the flag the platform already sets, so a release build of this sample gets
+        // the discarding sink and pays nothing. Which levels actually reach logcat is then somebody
+        // else's decision entirely: `adb shell setprop log.tag.ReflectorSync.push VERBOSE`.
+        val log = if (isDebuggable()) AndroidSyncLog() else SyncLog.None
+
         database =
             Room
                 .databaseBuilder<LedgerDatabase>(
@@ -68,7 +77,7 @@ class LedgerApplication : Application() {
 
         val transport =
             KtorSyncTransport(
-                client = syncHttpClient(OkHttp.create()),
+                client = syncHttpClient(OkHttp.create(), log, SyncHttpTracing.BASIC),
                 baseUrl = HOST,
                 tokens =
                     object : TokenProvider {
@@ -79,6 +88,7 @@ class LedgerApplication : Application() {
 
                         override suspend fun refresh(): Boolean = false
                     },
+                log = log,
             )
 
         collection =
@@ -87,6 +97,7 @@ class LedgerApplication : Application() {
                 transport = transport,
                 coroutineScope = workers,
                 triggerSources = listOf(triggers, PeriodicTriggerSource()),
+                log = log,
             ).scope(scopeId)
                 .collection(LEDGER)
 
@@ -94,6 +105,16 @@ class LedgerApplication : Application() {
         observeConnectivity()
         SyncWorker.schedule(this)
     }
+
+    /**
+     * Tells whether this build was signed for development.
+     *
+     * The flag the platform sets from the manifest, rather than `BuildConfig`: it needs no build
+     * feature switched on and it is the same question every Android application already asks.
+     *
+     * @return `true` when the application is debuggable.
+     */
+    private fun isDebuggable(): Boolean = applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0
 
     /**
      * Fires [SyncTrigger.FOREGROUND] when the application comes back to the user.

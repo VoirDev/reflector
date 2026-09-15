@@ -5,6 +5,8 @@ import dev.voir.reflector.sync.core.adapter.CollectionAdapter
 import dev.voir.reflector.sync.core.adapter.RemoteOp
 import dev.voir.reflector.sync.core.conflict.ConflictId
 import dev.voir.reflector.sync.core.conflict.ConflictOrigin
+import dev.voir.reflector.sync.core.log.SyncLogEvent
+import dev.voir.reflector.sync.core.log.SyncLogger
 import dev.voir.reflector.sync.core.metrics.SyncMetricEvent
 import dev.voir.reflector.sync.core.metrics.SyncMetrics
 import dev.voir.reflector.sync.core.metrics.emit
@@ -44,6 +46,7 @@ import kotlin.uuid.Uuid
  * @param adapter Application's bridge to its own rows.
  * @param limits Limits published by the server.
  * @param metrics Sink for how much was read and how long it took.
+ * @param log Sink for what the log delivered and what was done with it, bound to this collection.
  * @param clock Source of local time, used only for diagnostics.
  * @param newUuid Source of identifiers; injected so that tests can make them predictable.
  */
@@ -57,6 +60,7 @@ internal class PullCoordinator(
     private val adapter: CollectionAdapter,
     private val limits: SyncLimits,
     private val metrics: SyncMetrics,
+    private val log: SyncLogger,
     private val clock: Clock,
     private val newUuid: () -> Uuid,
 ) {
@@ -86,6 +90,17 @@ internal class PullCoordinator(
                     return handleFailure(failure)
                 }
 
+            log.debug(
+                SyncLogEvent.PULL_PAGE_RECEIVED,
+                context = {
+                    mapOf(
+                        "batches" to page.batches.size.toString(),
+                        "operations" to page.batches.sumOf { it.ops.size }.toString(),
+                        "hasMore" to page.hasMore.toString(),
+                    )
+                },
+            ) { "a page of the change log arrived and goes to the inbox before anything is applied" }
+
             transactions.transaction {
                 stores.inbox.store(scope, collection, page.batches.map { it.toStored() })
             }
@@ -97,6 +112,7 @@ internal class PullCoordinator(
                 // required bootstrap read an unknown share of what was there.
                 metrics.emit(
                     SyncMetricEvent.PullCompleted(scope, collection, applied, clock.now() - startedAt),
+                    log,
                 )
                 return PullOutcome.UpToDate
             }
@@ -115,6 +131,16 @@ internal class PullCoordinator(
             val batch = transactions.transaction { stores.inbox.oldestPending(scope, collection) } ?: return null
             val unknown = batch.ops.firstOrNull { operationOf(it) == null }
             if (unknown != null) {
+                log.error(
+                    SyncLogEvent.UNKNOWN_OPERATION,
+                    context = { mapOf("operation" to unknown.op, "seq" to batch.seq.value.toString()) },
+                ) {
+                    "the log carries an operation code this client does not understand; the collection is " +
+                        "rebuilt rather than skipping past a change it cannot apply"
+                }
+                log.info(SyncLogEvent.RESYNC_REQUIRED, context = { mapOf("reason" to "unknown-operation") }) {
+                    "the collection will be rebuilt from a snapshot because the log carried an unknown operation"
+                }
                 // Skipping is not an option: the cursor would move past the operation and the change
                 // would be lost for good. Refusing the batch and resynchronising is the only way out
                 // that neither loses it nor guesses what it meant.
@@ -126,6 +152,16 @@ internal class PullCoordinator(
                 return PullOutcome.BootstrapRequired
             }
             transactions.transaction { apply(batch) }
+            log.trace(
+                SyncLogEvent.BATCH_APPLIED,
+                context = {
+                    mapOf(
+                        "seq" to batch.seq.value.toString(),
+                        "operations" to batch.ops.size.toString(),
+                        "ownEcho" to (batch.originClientId == clientId).toString(),
+                    )
+                },
+            ) { "a batch was applied to the application's tables and the cursor moved with it" }
             onApplied()
         }
     }
@@ -216,6 +252,17 @@ internal class PullCoordinator(
                 serverVersion = op.version,
                 detectedAt = clock.now().toEpochMilliseconds(),
             )
+        log.warn(
+            SyncLogEvent.CONFLICT_OPENED,
+            context = {
+                mapOf(
+                    "entity" to op.entityType.value,
+                    "id" to op.entityId.value.toString(),
+                    "origin" to ConflictOrigin.PULL.name,
+                    "serverVersion" to op.version.value,
+                )
+            },
+        ) { "an incoming change disagrees with a local edit; both sides are kept until somebody decides" }
         // The record keeps the version it was based on: a resolution is applied on top of the
         // version stored with the conflict, and overwriting it here would leave the next push with
         // a base the user never saw.
@@ -225,6 +272,12 @@ internal class PullCoordinator(
     private suspend fun handleFailure(failure: SyncTransportFailure): PullOutcome =
         when (failure) {
             is SyncTransportFailure.CursorTooOld -> {
+                log.warn(SyncLogEvent.CURSOR_TOO_OLD, failure) {
+                    "the server no longer keeps history back to this client's cursor"
+                }
+                log.info(SyncLogEvent.RESYNC_REQUIRED, context = { mapOf("reason" to "cursor-too-old") }) {
+                    "the collection will be rebuilt from a snapshot because its cursor fell out of the window"
+                }
                 transactions.transaction {
                     stores.collections.setPhase(scope, collection, SyncPhase.RESYNC_REQUIRED)
                     stores.inbox.clear(scope, collection)
@@ -237,6 +290,10 @@ internal class PullCoordinator(
             }
 
             else -> {
+                log.debug(
+                    SyncLogEvent.REQUEST_FAILED,
+                    context = { mapOf("failure" to (failure::class.simpleName ?: "unknown")) },
+                ) { "the change log could not be read this cycle: ${failure.message.orEmpty()}" }
                 transactions.transaction {
                     stores.collections.recordFailure(scope, collection, failure.message.orEmpty())
                 }

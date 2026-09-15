@@ -1,9 +1,12 @@
 package dev.voir.reflector.sync.engine.push
 
+import dev.voir.reflector.sync.core.SyncFailure
 import dev.voir.reflector.sync.core.adapter.CollectionAdapter
 import dev.voir.reflector.sync.core.adapter.SyncRejection
 import dev.voir.reflector.sync.core.conflict.ConflictId
 import dev.voir.reflector.sync.core.conflict.ConflictOrigin
+import dev.voir.reflector.sync.core.log.SyncLogEvent
+import dev.voir.reflector.sync.core.log.SyncLogger
 import dev.voir.reflector.sync.core.metrics.PushMetricOutcome
 import dev.voir.reflector.sync.core.metrics.SyncMetricEvent
 import dev.voir.reflector.sync.core.metrics.SyncMetrics
@@ -62,6 +65,10 @@ import kotlin.uuid.Uuid
  * @param limits Limits published by the server.
  * @param backoff Delay policy for transient failures.
  * @param metrics Sink for what each attempt cost and how it ended.
+ * @param log Sink for what the queue did and why, already bound to this collection.
+ * @param reportFailure Told when an attempt ended in a failure the application has to see. The
+ *   coordinator does not own the collection's published state, and a refusal that only reached the
+ *   adapter's callback left that state saying the last attempt had succeeded.
  * @param clock Source of local time; used only for backoff and diagnostics, never for ordering.
  * @param newUuid Source of identifiers; injected so that tests can make them predictable.
  * @param maxDependencyMerges Ceiling on merges caused by dependency refusals.
@@ -77,6 +84,8 @@ internal class PushCoordinator(
     private val limits: SyncLimits,
     private val backoff: BackoffPolicy,
     private val metrics: SyncMetrics,
+    private val log: SyncLogger,
+    private val reportFailure: (SyncFailure) -> Unit = {},
     private val clock: Clock,
     private val newUuid: () -> Uuid,
     private val maxDependencyMerges: Int = DEFAULT_MAX_DEPENDENCY_MERGES,
@@ -99,6 +108,19 @@ internal class PushCoordinator(
                 }
 
                 is Preparation.Waiting -> {
+                    // The one line that answers "why is nothing leaving this device": the head of the
+                    // queue is read whatever state it is in, and what it is waiting for decides
+                    // whether anybody has to do something about it.
+                    log.debug(
+                        SyncLogEvent.PUSH_WAITING,
+                        context = {
+                            mapOf(
+                                "group" to preparation.groupId.value.toString(),
+                                "state" to preparation.state.name,
+                                "attempts" to preparation.attempts.toString(),
+                            )
+                        },
+                    ) { "the oldest group cannot be sent yet, so nothing behind it can either" }
                     return PushOutcome.Blocked
                 }
 
@@ -106,7 +128,24 @@ internal class PushCoordinator(
                     // Refused before it left the device, which is still an attempt that ended: the
                     // group is failed and the queue is blocked on it exactly as it would be by a
                     // refusal from the server.
+                    log.error(
+                        SyncLogEvent.PUSH_OVERSIZED,
+                        context = {
+                            mapOf(
+                                "group" to preparation.groupId.value.toString(),
+                                "operations" to preparation.operations.toString(),
+                            )
+                        },
+                    ) { "the group exceeds the server's limits and was refused before it left: ${preparation.reason}" }
                     report(preparation.operations, PushMetricOutcome.REJECTED, startedAt)
+                    reportFailure(
+                        SyncFailure.Rejected(
+                            entityType = null,
+                            entityId = null,
+                            rejection = SyncRejection.TooLarge(preparation.reason),
+                            message = preparation.reason,
+                        ),
+                    )
                     return PushOutcome.Blocked
                 }
 
@@ -119,6 +158,19 @@ internal class PushCoordinator(
                 .single()
                 .ops.size
 
+        log.debug(
+            SyncLogEvent.PUSH_SENT,
+            context = {
+                mapOf(
+                    "group" to
+                        prepared.group.groupId.value
+                            .toString(),
+                    "operations" to operations.toString(),
+                    "attempts" to prepared.group.attempts.toString(),
+                )
+            },
+        ) { "sending a group to the server" }
+
         val response =
             try {
                 transport.push(scope, collection, prepared.request)
@@ -130,6 +182,16 @@ internal class PushCoordinator(
         val result =
             response.results.firstOrNull { it.groupId == prepared.group.groupId }
                 ?: run {
+                    log.error(
+                        SyncLogEvent.REQUEST_FAILED,
+                        context = {
+                            mapOf(
+                                "group" to
+                                    prepared.group.groupId.value
+                                        .toString(),
+                            )
+                        },
+                    ) { "the server answered without a result for the group that was sent" }
                     report(operations, PushMetricOutcome.FAILED, startedAt)
                     return handleFailure(
                         prepared.group,
@@ -141,6 +203,7 @@ internal class PushCoordinator(
         // Reported after the transaction rather than inside it: a sink is the application's code,
         // and running it while a write lock is held is the one thing this library must never do.
         report(operations, result.toMetricOutcome(), startedAt)
+        reportOutcome(prepared, result, operations, startedAt)
         return outcome
     }
 
@@ -164,7 +227,84 @@ internal class PushCoordinator(
                 outcome = outcome,
                 duration = clock.now() - startedAt,
             ),
+            log,
         )
+    }
+
+    /**
+     * Describes how the server answered, in the terms somebody reading a log needs.
+     *
+     * Separate from [report] because the two audiences want different things: the metric is a count
+     * with a duration, and this is the sentence that says which entities the server disagreed about
+     * and what the application now has to do. Both run after the transaction that applied the answer.
+     *
+     * @param prepared Envelope that was sent.
+     * @param result Answer the server gave for it.
+     * @param operations Operations the envelope carried.
+     * @param startedAt Moment the attempt was picked up.
+     */
+    private fun reportOutcome(
+        prepared: Preparation.Ready,
+        result: PushGroupResult,
+        operations: Int,
+        startedAt: Instant,
+    ) {
+        val group =
+            prepared.group.groupId.value
+                .toString()
+        val tookMs = (clock.now() - startedAt).inWholeMilliseconds.toString()
+        when (result) {
+            is PushGroupResult.Applied -> {
+                log.debug(
+                    SyncLogEvent.PUSH_APPLIED,
+                    context = { mapOf("group" to group, "operations" to operations.toString(), "tookMs" to tookMs) },
+                ) { "the server applied the group; its changes are confirmed" }
+            }
+
+            is PushGroupResult.Conflict -> {
+                log.warn(
+                    SyncLogEvent.PUSH_CONFLICTED,
+                    context = {
+                        mapOf(
+                            "group" to group,
+                            "conflicts" to result.conflicts.size.toString(),
+                            // Types and identifiers only: a conflict entry carries both sides of a
+                            // document, and neither of them belongs in a diagnostic channel.
+                            "entities" to result.conflicts.joinToString { "${it.entity.value}/${it.id.value}" },
+                            "tookMs" to tookMs,
+                        )
+                    },
+                ) { "the server refused the group because entities in it had moved on; the queue waits for a decision" }
+            }
+
+            is PushGroupResult.Rejected -> {
+                if (result.error.code == RejectCode.DEPENDENCY) {
+                    return
+                }
+                log.error(
+                    SyncLogEvent.PUSH_REJECTED,
+                    context = {
+                        mapOf(
+                            "group" to group,
+                            "code" to result.error.code.value,
+                            "entity" to
+                                result.error.entity
+                                    ?.value
+                                    .orEmpty(),
+                            "id" to
+                                result.error.id
+                                    ?.value
+                                    ?.toString()
+                                    .orEmpty(),
+                            "tookMs" to tookMs,
+                        )
+                    },
+                ) {
+                    "the server refused the group permanently, so the queue is blocked on it until the " +
+                        "application corrects the data: ${result.error.message}"
+                }
+            }
+        }
     }
 
     private fun PushGroupResult.toMetricOutcome(): PushMetricOutcome =
@@ -192,7 +332,7 @@ internal class PushCoordinator(
         when (head.state) {
             PushGroupState.PENDING -> {
                 if (head.nextRetryAt != null && head.nextRetryAt > now) {
-                    return Preparation.Waiting
+                    return Preparation.Waiting(head.groupId, head.state, head.attempts)
                 }
             }
 
@@ -210,7 +350,7 @@ internal class PushCoordinator(
             // got, which is the single thing the ordering exists to prevent. What unblocks it is
             // the application — resolving the conflict, or correcting the data.
             PushGroupState.CONFLICTED, PushGroupState.FAILED -> {
-                return Preparation.Waiting
+                return Preparation.Waiting(head.groupId, head.state, head.attempts)
             }
         }
 
@@ -243,7 +383,7 @@ internal class PushCoordinator(
         oversized(ops, sent)?.let { reason ->
             failGroup(group.groupId, reason.message)
             adapter.onRejected(entityType = null, id = null, rejection = reason)
-            return Preparation.Rejected(ops.size)
+            return Preparation.Rejected(group.groupId, ops.size, reason.message)
         }
 
         return Preparation.Ready(
@@ -285,6 +425,10 @@ internal class PushCoordinator(
         // start again, because a backoff describes how one particular envelope was received, and
         // this one has not been sent yet.
         val rebuilt = GroupId(newUuid())
+        log.debug(
+            SyncLogEvent.PUSH_GROUP_REBUILT,
+            context = { mapOf("from" to group.groupId.value.toString(), "to" to rebuilt.value.toString()) },
+        ) { "the group was edited since it was last sent, so it goes out under a new idempotency key" }
         stores.groups.create(scope, collection, rebuilt)
         stores.groups.setOrdinal(rebuilt, group.ord)
         stores.groups.setDependencyMerges(rebuilt, group.dependencyMerges)
@@ -381,6 +525,14 @@ internal class PushCoordinator(
                     failGroup(prepared.group.groupId, result.error.message)
                     adapter.onRejected(result.error.entity, result.error.id, result.error.toRejection())
                     stores.collections.recordFailure(scope, collection, result.error.message)
+                    reportFailure(
+                        SyncFailure.Rejected(
+                            entityType = result.error.entity,
+                            entityId = result.error.id,
+                            rejection = result.error.toRejection(),
+                            message = result.error.message,
+                        ),
+                    )
                     PushOutcome.Blocked
                 }
             }
@@ -408,6 +560,15 @@ internal class PushCoordinator(
         message: String,
     ): PushOutcome {
         if (group.dependencyMerges >= maxDependencyMerges) {
+            log.error(
+                SyncLogEvent.DEPENDENCY_EXHAUSTED,
+                context = {
+                    mapOf("group" to group.groupId.value.toString(), "merges" to group.dependencyMerges.toString())
+                },
+            ) {
+                "the server still calls the group dependent after $maxDependencyMerges merges; it is failed " +
+                    "and the queue is blocked on it: $message"
+            }
             failGroup(group.groupId, message)
             adapter.onRejected(
                 entityType = null,
@@ -419,6 +580,18 @@ internal class PushCoordinator(
                     ),
             )
             stores.collections.recordFailure(scope, collection, message)
+            reportFailure(
+                SyncFailure.Rejected(
+                    entityType = null,
+                    entityId = null,
+                    rejection =
+                        SyncRejection.Unknown(
+                            code = RejectCode.DEPENDENCY.value,
+                            message = message,
+                        ),
+                    message = message,
+                ),
+            )
             return PushOutcome.Blocked
         }
 
@@ -426,6 +599,10 @@ internal class PushCoordinator(
         if (next == null) {
             // There is nothing to merge with, so the dependency has to be satisfied by somebody
             // else's change. Waiting is the only honest option.
+            log.debug(
+                SyncLogEvent.PUSH_WAITING,
+                context = { mapOf("group" to group.groupId.value.toString(), "state" to "DEPENDENCY") },
+            ) { "the group depends on a change this client has not got yet, and there is nothing to merge it with" }
             stores.groups.recordAttempt(
                 groupId = group.groupId,
                 state = PushGroupState.PENDING,
@@ -438,6 +615,17 @@ internal class PushCoordinator(
         // The merged group is a new group on purpose: the server has already stored an answer under
         // the old identifier, and re-sending it would replay that answer instead of the new content.
         val merged = GroupId(newUuid())
+        log.debug(
+            SyncLogEvent.DEPENDENCY_MERGED,
+            context = {
+                mapOf(
+                    "group" to group.groupId.value.toString(),
+                    "with" to next.groupId.value.toString(),
+                    "into" to merged.value.toString(),
+                    "merges" to (group.dependencyMerges + 1).toString(),
+                )
+            },
+        ) { "the server called the group dependent, so it is merged with the next one and will go out again" }
         stores.groups.create(scope, collection, merged)
         stores.groups.setOrdinal(merged, group.ord)
         stores.groups.setDependencyMerges(merged, group.dependencyMerges + 1)
@@ -485,7 +673,20 @@ internal class PushCoordinator(
             }
         // Outside the transaction: a sink is the application's code, and it must never run with a
         // write lock held.
-        scheduled?.let { delay -> metrics.emit(SyncMetricEvent.RetryScheduled(scope, collection, attempts, delay)) }
+        scheduled?.let { delay ->
+            metrics.emit(SyncMetricEvent.RetryScheduled(scope, collection, attempts, delay), log)
+            log.debug(
+                SyncLogEvent.RETRY_SCHEDULED,
+                context = {
+                    mapOf(
+                        "group" to group.groupId.value.toString(),
+                        "attempts" to attempts.toString(),
+                        "delayMs" to delay.inWholeMilliseconds.toString(),
+                        "serverAsked" to (failure is SyncTransportFailure.RateLimited).toString(),
+                    )
+                },
+            ) { "the push failed on the transport; the group waits before the next attempt" }
+        }
         return outcome
     }
 
@@ -511,19 +712,32 @@ internal class PushCoordinator(
         /**
          * The group was refused before it left; it is already marked as failed.
          *
+         * @property groupId Group that was refused.
          * @property operations Operations the refused group would have carried.
+         * @property reason Why the group could not be sent, in the words the application is given.
          */
         data class Rejected(
+            val groupId: GroupId,
             val operations: Int,
+            val reason: String,
         ) : Preparation()
 
         /**
          * The head of the queue cannot be sent, so nothing can.
          *
          * It is waiting for a decision, refused permanently, or serving a backoff. They differ in
-         * what unblocks them and not in what the queue does meanwhile.
+         * what unblocks them and not in what the queue does meanwhile — but they differ entirely in
+         * whether anybody has to act, which is why the state is carried out for the log to name.
+         *
+         * @property groupId Group at the head of the queue.
+         * @property state What it is waiting in.
+         * @property attempts Attempts already made on it.
          */
-        data object Waiting : Preparation()
+        data class Waiting(
+            val groupId: GroupId,
+            val state: PushGroupState,
+            val attempts: Int,
+        ) : Preparation()
 
         /**
          * An envelope ready to be sent.

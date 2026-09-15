@@ -5,6 +5,8 @@ import dev.voir.reflector.sync.core.adapter.RemoteOp
 import dev.voir.reflector.sync.core.conflict.Conflict
 import dev.voir.reflector.sync.core.conflict.ConflictId
 import dev.voir.reflector.sync.core.conflict.Resolution
+import dev.voir.reflector.sync.core.log.SyncLogEvent
+import dev.voir.reflector.sync.core.log.SyncLogger
 import dev.voir.reflector.sync.persistence.SyncStores
 import dev.voir.reflector.sync.persistence.SyncTransactionRunner
 import dev.voir.reflector.sync.persistence.conflict.StoredConflict
@@ -27,6 +29,7 @@ import kotlin.uuid.Uuid
  * @param stores Storage of the library.
  * @param transactions Transaction boundary of the application's database.
  * @param adapter Application's bridge to its own rows.
+ * @param log Sink for what was decided about a conflict and by whom, bound to this collection.
  * @param newUuid Source of identifiers; injected so that tests can make them predictable.
  */
 internal class ConflictCoordinator(
@@ -35,6 +38,7 @@ internal class ConflictCoordinator(
     private val stores: SyncStores,
     private val transactions: SyncTransactionRunner,
     private val adapter: CollectionAdapter,
+    private val log: SyncLogger,
     private val newUuid: () -> Uuid,
 ) {
     /**
@@ -46,7 +50,25 @@ internal class ConflictCoordinator(
      */
     suspend fun offerToAdapter(conflictId: ConflictId): Boolean {
         val stored = transactions.transaction { stores.conflicts.find(conflictId) } ?: return true
-        val resolution = adapter.resolve(stored.toConflict()) ?: return false
+        val resolution = adapter.resolve(stored.toConflict())
+        log.debug(
+            SyncLogEvent.CONFLICT_OFFERED,
+            context = {
+                mapOf(
+                    "conflict" to conflictId.value.toString(),
+                    "entity" to stored.entityType.value,
+                    "id" to stored.entityId.value.toString(),
+                    "decided" to (resolution != null).toString(),
+                )
+            },
+        ) {
+            if (resolution == null) {
+                "the adapter left this conflict to the user interface; it stays open and blocks its group"
+            } else {
+                "the adapter decided this conflict without the user"
+            }
+        }
+        resolution ?: return false
         resolve(conflictId, resolution)
         return true
     }
@@ -78,6 +100,18 @@ internal class ConflictCoordinator(
             stores.conflicts.delete(conflictId)
             group?.let { reviveIfSettled(it) }
         }
+        // After the transaction: a sink is the application's code and must not run with a write lock
+        // held. Which way a conflict went is the fact nothing else records — the conflict row is gone
+        // by now, and the queue only shows that it started moving again.
+        log.info(
+            SyncLogEvent.CONFLICT_RESOLVED,
+            context = {
+                mapOf(
+                    "conflict" to conflictId.value.toString(),
+                    "resolution" to resolution::class.simpleName.orEmpty(),
+                )
+            },
+        ) { "a conflict was decided and its group may leave again" }
     }
 
     private suspend fun keepLocal(stored: StoredConflict) {

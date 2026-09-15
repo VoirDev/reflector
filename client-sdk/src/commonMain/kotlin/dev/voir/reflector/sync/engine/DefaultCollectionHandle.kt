@@ -8,11 +8,14 @@ import dev.voir.reflector.sync.core.SyncPhase
 import dev.voir.reflector.sync.core.conflict.Conflict
 import dev.voir.reflector.sync.core.conflict.ConflictId
 import dev.voir.reflector.sync.core.conflict.Resolution
+import dev.voir.reflector.sync.core.diagnostics.CollectionDiagnostics
+import dev.voir.reflector.sync.core.diagnostics.QueuedGroupDiagnostics
 import dev.voir.reflector.sync.engine.conflict.ConflictCoordinator
 import dev.voir.reflector.sync.engine.mutation.MutationCoordinator
 import dev.voir.reflector.sync.persistence.SyncStores
 import dev.voir.reflector.sync.persistence.SyncTransactionRunner
 import dev.voir.reflector.sync.persistence.conflict.StoredConflict
+import dev.voir.reflector.sync.persistence.group.PendingGroup
 import dev.voir.reflector.sync.protocol.CollectionId
 import dev.voir.reflector.sync.protocol.ScopeId
 import kotlinx.coroutines.CoroutineScope
@@ -22,6 +25,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
+import kotlin.time.Instant
 
 /**
  * The application's handle on one collection.
@@ -104,6 +108,55 @@ internal class DefaultCollectionHandle(
         conflictCoordinator.resolve(conflictId, resolution)
         worker.requestSync()
     }
+
+    override suspend fun diagnostics(): CollectionDiagnostics =
+        // One transaction for all of it. Read separately, the queue could be a group shorter than
+        // the pending count beside it describes, and a snapshot whose parts disagree is worse to
+        // reason about than one that is a moment old.
+        transactions.transaction {
+            val stored = stores.collections.ensure(scope, collection)
+            val queue = stores.groups.queue(scope, collection)
+            CollectionDiagnostics(
+                scope = scope,
+                collection = collection,
+                // The stored phase, not the published one: NEEDS_ATTENTION is derived from the
+                // conflict count, which is reported here in its own right.
+                phase = stored.phase,
+                cursor = stored.cursor,
+                generation = stored.generation,
+                bootstrapPage = stored.bootstrapPage,
+                schemaFingerprint = stored.schemaFingerprint,
+                pendingCount = stores.records.pendingCount(scope, collection),
+                conflictCount = stores.conflicts.openIds(scope, collection).size,
+                lastError = stored.lastError,
+                failureCount = stored.failureCount,
+                lastPullAt = stored.lastPullAt,
+                lastPushAt = stored.lastPushAt,
+                queue = queue.map { group -> group.describe() },
+            )
+        }
+
+    /**
+     * Describes one queued group, counting what it would actually send.
+     *
+     * The operation count comes from the records rather than from the group row, because a group
+     * holds records that have since been acknowledged along another path: a group of five whose
+     * four clean records were never released would be described as sending five operations and
+     * would send one.
+     *
+     * @return The group as the application is shown it.
+     */
+    private suspend fun PendingGroup.describe(): QueuedGroupDiagnostics =
+        QueuedGroupDiagnostics(
+            groupId = groupId,
+            ordinal = ord,
+            state = state,
+            operations = stores.records.ofGroup(groupId).count { it.isDirty },
+            attempts = attempts,
+            nextRetryAt = nextRetryAt?.let(Instant::fromEpochMilliseconds),
+            dependencyMerges = dependencyMerges,
+            lastError = lastError,
+        )
 
     /**
      * Replaces a live phase with [SyncPhase.NEEDS_ATTENTION] once conflicts have piled up.

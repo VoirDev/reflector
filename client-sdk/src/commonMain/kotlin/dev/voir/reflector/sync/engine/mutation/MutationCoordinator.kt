@@ -1,5 +1,7 @@
 package dev.voir.reflector.sync.engine.mutation
 
+import dev.voir.reflector.sync.core.log.SyncLogEvent
+import dev.voir.reflector.sync.core.log.SyncLogger
 import dev.voir.reflector.sync.persistence.SyncStores
 import dev.voir.reflector.sync.persistence.SyncTransactionRunner
 import dev.voir.reflector.sync.persistence.group.PushGroupState
@@ -23,11 +25,14 @@ import dev.voir.reflector.sync.protocol.ScopeId
  *
  * @param stores Storage of the library.
  * @param transactions Transaction boundary of the application's database.
+ * @param log Sink for how groups were merged, which is what explains a queue that has become one
+ *   large group.
  * @param newGroupId Source of group identifiers; injected so that tests can make them predictable.
  */
 internal class MutationCoordinator(
     private val stores: SyncStores,
     private val transactions: SyncTransactionRunner,
+    private val log: SyncLogger,
     private val newGroupId: () -> GroupId,
 ) {
     /**
@@ -114,6 +119,20 @@ internal class MutationCoordinator(
         // The survivor takes the earliest position of the merged groups, so that merging never moves
         // a change behind something that was queued after it.
         val survivor = groups.minBy { it.ord }
+        if (groups.size > 1) {
+            // The degradation described on this class, made visible: merging is transitive, so an
+            // entity edited in every transaction drags the whole queue into one envelope. Nothing
+            // else shows it happening.
+            log.debug(
+                SyncLogEvent.GROUPS_MERGED,
+                context = {
+                    mapOf(
+                        "merged" to groups.size.toString(),
+                        "into" to survivor.groupId.value.toString(),
+                    )
+                },
+            ) { "queued groups share an entity, so they are merged and will be sent as one" }
+        }
         for (group in groups) {
             if (group.groupId != survivor.groupId) {
                 stores.records.reassignGroup(group.groupId, survivor.groupId)

@@ -14,8 +14,7 @@ TODO.md                      Work that is known and not yet done
 docs/
   sync-client-design.md      Client library specification
   sync-server-design.md      Server module specification
-.claude/skills/handbook/     The handbook reading order as a Claude Code skill; it routes, not restates
-handbooks/                   The engineering handbook: the Kotlin standard this repository holds to
+.claude/settings.json        Enables the `handbooks` plugin, which carries the engineering standard
 contracts/
   sync-protocol/             Protocol wire contracts shared by client and server
 client-sdk/                  The client library, one module published as one artifact
@@ -37,33 +36,47 @@ VERSION                      Repository version; every module takes its version 
 
 ## Handbook
 
-`handbooks/` **is** the engineering handbook for this repository. There is no other copy to
-consult and nothing to reconcile it against: what is in the directory is what applies, and a rule
-that is not there is not a rule here.
+The engineering standard this repository holds to is the **`handbooks` plugin**, from the
+[`voir-handbooks`](https://github.com/VoirDev/handbook) marketplace. It is enabled for this
+repository in [`.claude/settings.json`](.claude/settings.json), and it ships the standard as
+on-demand skills rather than as documents checked in here.
 
-The directory is the authority on its own contents. It is refreshed by replacing documents, and it
-will grow, so read what is in it rather than what any list — including this one — says is in it.
+The repository used to keep its own copy in `handbooks/`. It does not any more, and that is the
+point: one copy, shared across Voir projects, versioned and updated where it is written instead of
+drifting per repository. There is nothing in this repository to reconcile the plugin against, and a
+rule the plugin does not carry is not a rule here.
 
-For Claude Code the same reading order is packaged as the `handbook` skill in
-[`.claude/skills/handbook/`](.claude/skills/handbook/SKILL.md), so that `exposed.md` is opened when
-the Exposed package is touched rather than only when somebody remembers this section. The skill
-routes and does not restate: the rules live in `handbooks/` and nowhere else.
+The plugin is the authority on its own contents. It will grow and its skills will be revised, so
+read what the plugin offers rather than what any list — including this one — says it offers.
 
-Before any change to Kotlin code, read in this order:
+Before any change to Kotlin code, invoke in this order:
 
-1. `handbooks/kotlin.md` — always mandatory, for every module and source set.
-2. The document covering the area being changed, if the directory has one. Today that is
-   `handbooks/exposed.md` for the `sync.server.postgres` package of `server-sdk/`, which is
-   mandatory before touching it, and `handbooks/optional-kmp.md` for multiplatform questions.
-3. Where no document covers the area — the client SDK's application-level concerns are the
-   current example — `kotlin.md` and this repository's own rules are the whole of the standard.
-   That is a real answer, not a gap to be filled by guessing at a convention.
+1. `kotlin-style` — always mandatory, for every module and source set.
+2. The skill covering the area being changed, when the plugin has one. Today that is
+   `exposed-v1-5` for the `sync.server.postgres` package of `server-sdk/`, which is mandatory
+   before touching it, and `optional-kmp-v1` for three-state partial updates. The plugin also
+   carries `kmp-application-architecture`, and `github-verify-workflow` and
+   `github-release-workflow` for when [TODO.md](TODO.md) items 2 and 3 are taken up.
+3. Where no skill covers the area — the client SDK's application-level concerns are the current
+   example — `kotlin-style` and this repository's own rules are the whole of the standard. That is
+   a real answer, not a gap to be filled by guessing at a convention.
 
-How to apply them: a narrower document **refines** a broader one rather than replacing it. The
+The versions line up rather than being assumed to: this repository builds on Kotlin 2.4.10 and
+Exposed 1.5.0, which is what `kotlin-style` and `exposed-v1-5` are written against. When a
+dependency in [`gradle/libs.versions.toml`](gradle/libs.versions.toml) moves past what a skill
+states it was validated for, that is a conflict to raise rather than to assume away.
+
+How to apply them: a narrower skill **refines** a broader one rather than replacing it. The
 requirements of a specific task and this repository's rules take priority over the handbook. An
-irreconcilable conflict between documents must be raised explicitly rather than resolved silently.
+irreconcilable conflict must be raised explicitly rather than resolved silently —
+[`docs/sync-server-design.md`](docs/sync-server-design.md) records one such departure and its
+reasoning, which is the shape that argument is expected to take.
 
-A convention cannot be inferred from a file name — a document is read in full.
+A convention cannot be inferred from a skill's name — a skill is read in full.
+
+If the plugin is not available in the session, say so rather than proceeding on memory of what it
+used to say: the rules below are the part this repository will not do without, and they are not the
+whole of the standard.
 
 What from the handbook applies constantly and is not up for discussion:
 
@@ -117,7 +130,7 @@ Invariants that cannot be broken without rewriting the specification:
   nothing but review enforces this — the deliberate exception is `SyncModule.create`, which takes
   the host's Exposed `Database` so the module never picks up a global default.
 
-Before changing anything in the `.postgres` package, reading `handbooks/exposed.md` is
+Before changing anything in the `.postgres` package, invoking the `exposed-v1-5` skill is
 mandatory: it fixes the naming of tables and constraints, the use of `kotlin.uuid`/`kotlin.time`,
 the rules for transactions and the requirements for migrations.
 

@@ -8,6 +8,7 @@ import dev.voir.reflector.sync.protocol.ScopeId
 import dev.voir.reflector.sync.server.CollectionSpec
 import dev.voir.reflector.sync.server.ProjectionListener
 import dev.voir.reflector.sync.server.SyncCommitListener
+import dev.voir.reflector.sync.server.SyncLog
 import dev.voir.reflector.sync.server.SyncMetricEvent
 import dev.voir.reflector.sync.server.SyncMetrics
 import dev.voir.reflector.sync.server.syncConfig
@@ -68,6 +69,7 @@ object PostgresFixture {
      * @param commitListeners Listeners notified after a commit.
      * @param projections Listeners notified inside the transaction.
      * @param metrics Sink the module reports its measurements to.
+     * @param log Sink the module's own account of what it did goes to.
      * @return Freshly assembled module.
      */
     fun module(
@@ -77,6 +79,7 @@ object PostgresFixture {
         commitListeners: List<SyncCommitListener> = emptyList(),
         projections: List<ProjectionListener> = emptyList(),
         metrics: SyncMetrics = SyncMetrics.None,
+        log: SyncLog = SyncLog.None,
     ): SyncModule =
         SyncModule.create(
             database = database,
@@ -90,6 +93,7 @@ object PostgresFixture {
             commitListeners = commitListeners,
             projections = projections,
             metrics = metrics,
+            log = log,
         )
 
     /** Empties every table so that one test cannot see another's rows. */

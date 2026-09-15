@@ -4,6 +4,7 @@ import dev.voir.reflector.sync.core.SyncPhase
 import dev.voir.reflector.sync.core.adapter.SchemaFingerprint
 import dev.voir.reflector.sync.protocol.Cursor
 import dev.voir.reflector.sync.protocol.PageToken
+import kotlin.time.Instant
 
 /**
  * Synchronisation state of a collection, in the terms the engine works in.
@@ -18,8 +19,12 @@ import dev.voir.reflector.sync.protocol.PageToken
  *   progress.
  * @property schemaFingerprint Shape the application's tables had when this collection was last
  *   synchronised, or `null` when the adapter declares none.
- * @property failureCount Consecutive failures, the input of the collection's backoff.
+ * @property failureCount Consecutive failures recorded against the collection.
  * @property lastError Description of the most recent failure, or `null` after a success.
+ * @property lastPullAt When the last successful pull finished, or `null` when there has been none.
+ *   Local wall-clock time, and purely diagnostic: no decision here reads the device's clock.
+ * @property lastPushAt When the last successful push finished, or `null` when there has been none.
+ *   Diagnostic in exactly the same way.
  */
 internal data class CollectionState(
     public val cursor: Cursor?,
@@ -29,4 +34,6 @@ internal data class CollectionState(
     public val schemaFingerprint: SchemaFingerprint?,
     public val failureCount: Int,
     public val lastError: String?,
+    public val lastPullAt: Instant?,
+    public val lastPushAt: Instant?,
 )

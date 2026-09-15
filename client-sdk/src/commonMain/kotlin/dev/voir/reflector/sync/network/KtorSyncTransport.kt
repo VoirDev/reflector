@@ -1,6 +1,9 @@
 package dev.voir.reflector.sync.network
 
 import dev.voir.reflector.sync.core.TokenProvider
+import dev.voir.reflector.sync.core.log.SyncLog
+import dev.voir.reflector.sync.core.log.SyncLogEvent
+import dev.voir.reflector.sync.core.log.SyncLogger
 import dev.voir.reflector.sync.core.transport.SyncTransport
 import dev.voir.reflector.sync.core.transport.SyncTransportFailure
 import dev.voir.reflector.sync.protocol.CollectionId
@@ -48,12 +51,18 @@ import kotlin.time.Duration.Companion.seconds
  * @param client HTTP client, configured by [syncHttpClient].
  * @param baseUrl Root the endpoints are resolved against, for example `https://api.example.com`.
  * @param tokens Application's source of credentials.
+ * @param log Sink told when a request fails and when credentials are renewed. The exchanges
+ *   themselves are described by the client's own tracing, which
+ *   [syncHttpClient] routes into the same sink.
  */
 public class KtorSyncTransport(
     private val client: HttpClient,
     private val baseUrl: String,
     private val tokens: TokenProvider,
+    private val log: SyncLog = SyncLog.None,
 ) : SyncTransport {
+    private val logger = SyncLogger(log)
+
     override suspend fun push(
         scope: ScopeId,
         collection: CollectionId,
@@ -122,7 +131,15 @@ public class KtorSyncTransport(
         if (response.status != HttpStatusCode.Unauthorized) {
             return ensureSuccess(response)
         }
-        if (!tokens.refresh()) {
+        val renewed = tokens.refresh()
+        logger.info(SyncLogEvent.TOKEN_REFRESHED, context = { mapOf("renewed" to renewed.toString()) }) {
+            if (renewed) {
+                "the server refused the credentials; the application renewed them and the request is retried once"
+            } else {
+                "the server refused the credentials and the application could not renew them"
+            }
+        }
+        if (!renewed) {
             throw SyncTransportFailure.Unauthorized("the server refused the credentials and they could not be renewed")
         }
         return ensureSuccess(attempt(block))
@@ -136,6 +153,13 @@ public class KtorSyncTransport(
         } catch (failure: Exception) {
             // Anything that prevents an answer from arriving is transient by default: the engine
             // retries it with backoff, which is the right behaviour for a client that works offline.
+            // The throwable is carried on the failure and reported here as well, because this is
+            // where the original — a DNS failure, a certificate, a refused connection — still exists;
+            // by the time the engine has it, it is a description.
+            logger.debug(
+                SyncLogEvent.REQUEST_FAILED,
+                context = { mapOf("failure" to (failure::class.simpleName ?: "unknown")) },
+            ) { "the request did not complete: ${failure.message.orEmpty()}" }
             throw SyncTransportFailure.Unreachable(failure.message ?: "the server could not be reached", failure)
         }
 
@@ -162,6 +186,10 @@ public class KtorSyncTransport(
             }
 
             else -> {
+                logger.warn(
+                    SyncLogEvent.REQUEST_FAILED,
+                    context = { mapOf("status" to response.status.value.toString()) },
+                ) { "the server answered with a status this client cannot interpret further" }
                 throw SyncTransportFailure.ServerError(response.status.value, response.status.description)
             }
         }

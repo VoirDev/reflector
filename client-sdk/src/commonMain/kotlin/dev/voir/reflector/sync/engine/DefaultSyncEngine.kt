@@ -4,6 +4,9 @@ import dev.voir.reflector.sync.core.ConflictThreshold
 import dev.voir.reflector.sync.core.ScopeHandle
 import dev.voir.reflector.sync.core.SyncEngine
 import dev.voir.reflector.sync.core.adapter.CollectionAdapter
+import dev.voir.reflector.sync.core.log.SyncLog
+import dev.voir.reflector.sync.core.log.SyncLogEvent
+import dev.voir.reflector.sync.core.log.SyncLogger
 import dev.voir.reflector.sync.core.metrics.SyncMetrics
 import dev.voir.reflector.sync.core.transport.SyncEventChannel
 import dev.voir.reflector.sync.core.transport.SyncTransport
@@ -39,6 +42,12 @@ import kotlin.uuid.Uuid
  * @param metrics Sink for what the library measures about itself — how the queue drains, how far
  *   behind the log it runs, what a bootstrap costs. The default discards everything, because an
  *   application that does not want numbers should not have to produce them.
+ * @param log Sink for what the library is doing and why, in order, for one device. It answers the
+ *   question [metrics] cannot: not "how is the fleet" but "why did this installation stop". The
+ *   default discards everything and is asked nothing, so a release build pays nothing for it; a
+ *   development build passes
+ *   [dev.voir.reflector.sync.core.log.ConsoleSyncLog] or, on Android,
+ *   `AndroidSyncLog`, and sees the engine's decisions.
  * @param coroutineScope Scope the background workers run in. The application owns it, so stopping
  *   synchronisation is a matter of cancelling something it already holds.
  * @param clock Source of local time. It is used for backoff and diagnostics only — order and
@@ -56,6 +65,7 @@ public fun SyncEngine(
     triggerSources: List<SyncTriggerSource> = listOf(PeriodicTriggerSource()),
     conflictThreshold: ConflictThreshold = ConflictThreshold.Default,
     metrics: SyncMetrics = SyncMetrics.None,
+    log: SyncLog = SyncLog.None,
     clock: Clock = Clock.System,
     newUuid: () -> Uuid = { Uuid.random() },
 ): SyncEngine =
@@ -68,6 +78,7 @@ public fun SyncEngine(
         triggerSources = triggerSources,
         conflictThreshold = conflictThreshold,
         metrics = metrics,
+        log = log,
         coroutineScope = coroutineScope,
         clock = clock,
         newUuid = newUuid,
@@ -89,12 +100,32 @@ internal class DefaultSyncEngine(
     private val triggerSources: List<SyncTriggerSource>,
     private val conflictThreshold: ConflictThreshold,
     private val metrics: SyncMetrics,
+    private val log: SyncLog,
     private val coroutineScope: CoroutineScope,
     private val clock: Clock,
     private val newUuid: () -> Uuid,
 ) : SyncEngine {
     private var active: DefaultScopeHandle? = null
     private var activeId: ScopeId? = null
+
+    private val logger = SyncLogger(log)
+
+    init {
+        // The first line in any log of this library, and the one that settles the questions a
+        // reader would otherwise ask of every line after it: which collections exist, whether a
+        // notification channel is installed, and what will wake the workers at all.
+        logger.info(
+            SyncLogEvent.ENGINE_CREATED,
+            context = {
+                mapOf(
+                    "collections" to adapters.keys.joinToString { it.value },
+                    "eventChannel" to (eventChannel != null).toString(),
+                    "triggerSources" to triggerSources.size.toString(),
+                    "conflictThreshold" to conflictThreshold.value.toString(),
+                )
+            },
+        ) { "the synchronisation engine was built" }
+    }
 
     override fun scope(scopeId: ScopeId): ScopeHandle {
         val current = active
@@ -114,12 +145,16 @@ internal class DefaultSyncEngine(
             triggerSources = triggerSources,
             conflictThreshold = conflictThreshold,
             metrics = metrics,
+            log = log,
             coroutineScope = coroutineScope,
             clock = clock,
             newUuid = newUuid,
         ).also {
             active = it
             activeId = scopeId
+            logger.info(SyncLogEvent.SCOPE_OPENED, context = { mapOf("scope" to scopeId.value) }) {
+                "the scope was opened and its workers started"
+            }
         }
     }
 
@@ -132,6 +167,10 @@ internal class DefaultSyncEngine(
             }
         }
         handle.wipe()
+        logger.info(
+            SyncLogEvent.SCOPE_WIPED,
+            context = { mapOf("scope" to activeId?.value.orEmpty(), "discardPending" to discardPending.toString()) },
+        ) { "signed out: the workers are stopped and the scope's local data is gone" }
         active = null
         activeId = null
     }

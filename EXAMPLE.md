@@ -233,6 +233,38 @@ Five events: `PushGroupServed`, `ChangesServed`, `SnapshotServed`, `CursorRefuse
 Called after the work is durable, never while the lock is held. It must not throw — a throw is
 swallowed, and you lose the metric rather than the batch.
 
+## 1.8.1 Logs, when a number is not enough
+
+Numbers say how the deployment is doing. When you need to know what happened to one request, wire
+the log port — and wire it on the first day, because one thing the module reports is invisible in
+every other channel: a commit listener of yours that throws leaves the batch committed and the
+notification undelivered, so every client of that scope falls back on polling and synchronisation
+merely looks slow.
+
+`server-sdk` depends on no logging library. The adapter is yours, and it is about ten lines —
+`samples/ledger-server` has it as `Slf4jSyncLog`:
+
+```kotlin
+SyncMigrations.migrate(dataSource, log)                // says how many migrations ran
+SyncModule.create(database = database, config = config, log = log)
+```
+
+The point of the port is `isEnabled(level, source)`. Your adapter answers it from your own logging
+framework, so what the module says is configured where everything else in your server is configured
+— at runtime, per area, without a redeploy:
+
+```xml
+<logger name="dev.voir.reflector.sync" level="INFO"/>
+<logger name="dev.voir.reflector.sync.push" level="DEBUG"/>
+```
+
+Per area, because turning one level up for everything is not practical on a running server: the read
+paths outnumber the writes by orders of magnitude and would bury them. The module asks `isEnabled`
+before it formats anything, so a level nobody switched on costs a comparison.
+
+No record carries a stored document, at any level. Your users' data stays out of logs that get
+shipped to aggregators and kept for months.
+
 ## 1.9 Reading documents from your own code
 
 ```kotlin
@@ -477,13 +509,35 @@ data class CollectionSyncState(
     val phase: SyncPhase,          // NEW | BOOTSTRAPPING | LIVE | NEEDS_ATTENTION | RESYNC_REQUIRED
     val pendingCount: Int,
     val conflictCount: Int,
-    val lastFailure: SyncFailure?, // Network | Server | Rejected | Local
+    val lastFailure: SyncFailure?, // Network | Server | AuthRequired | Revoked | Rejected | Local
 )
 ```
 
 `collection.state` is a `StateFlow`; `scope.state` carries `Online | Offline | AuthRequired |
 Revoked`. Between the two, a status line ("3 changes waiting", "sign in to sync", "1 conflict") is a
 few lines of UI and no polling.
+
+When that status line says "3 changes waiting" and has been saying it for an hour, ask the
+collection what is going on:
+
+```kotlin
+val diagnostics = collection.diagnostics()
+if (diagnostics.isQueueBlocked) {
+    val head = diagnostics.queue.first()          // the group everything else is waiting behind
+    println("${head.state}: ${head.lastError}")   // "FAILED: currency is required"
+}
+```
+
+`diagnostics()` reads the database, so it is not something to call on every frame — but it is
+durable, which `lastFailure` is not: a queue blocked since before the process started is exactly
+the case where nobody was watching when it happened.
+
+`lastFailure` keeps whatever the library actually knows rather than flattening it into a sentence.
+`Network` and `Local` carry the throwable behind them — a fault in your adapter arrives with its
+stack, which is the only part of it worth having — and the two failures the protocol names are
+reported as themselves rather than as a status code standing in for them. `Rejected` is the one to
+watch: it means the server refused a change permanently, the collection's queue is blocked on it,
+and nothing will leave the device until you rewrite that data.
 
 `NEEDS_ATTENTION` is the phase to notice. It replaces `LIVE` once open conflicts reach the engine's
 `conflictThreshold` (`ConflictThreshold.Default`, 20), and it means what it says: a conflict blocks

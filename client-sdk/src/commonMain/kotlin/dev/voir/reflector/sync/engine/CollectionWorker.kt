@@ -4,7 +4,10 @@ import dev.voir.reflector.sync.core.ScopeState
 import dev.voir.reflector.sync.core.SyncFailure
 import dev.voir.reflector.sync.core.SyncPhase
 import dev.voir.reflector.sync.core.adapter.CollectionAdapter
+import dev.voir.reflector.sync.core.adapter.SchemaFingerprint
 import dev.voir.reflector.sync.core.conflict.ConflictId
+import dev.voir.reflector.sync.core.log.SyncLogEvent
+import dev.voir.reflector.sync.core.log.SyncLogger
 import dev.voir.reflector.sync.core.metrics.SyncMetricEvent
 import dev.voir.reflector.sync.core.metrics.SyncMetrics
 import dev.voir.reflector.sync.core.metrics.emit
@@ -20,6 +23,7 @@ import dev.voir.reflector.sync.engine.push.PushOutcome
 import dev.voir.reflector.sync.engine.retry.BackoffPolicy
 import dev.voir.reflector.sync.persistence.SyncStores
 import dev.voir.reflector.sync.persistence.SyncTransactionRunner
+import dev.voir.reflector.sync.persistence.group.PushGroupState
 import dev.voir.reflector.sync.protocol.ClientId
 import dev.voir.reflector.sync.protocol.CollectionId
 import dev.voir.reflector.sync.protocol.ScopeId
@@ -29,6 +33,7 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlin.time.Clock
+import kotlin.time.Instant
 import kotlin.uuid.Uuid
 
 /**
@@ -50,6 +55,8 @@ import kotlin.uuid.Uuid
  * @param adapter Application's bridge to its own rows.
  * @param scopeState State shared by every collection of the scope.
  * @param metrics Sink the worker and its coordinators report through.
+ * @param log Sink the worker and its coordinators describe their decisions through, already bound
+ *   to this collection.
  * @param coroutineScope Scope the worker's loop runs in; cancelling it stops the worker.
  * @param clock Source of local time, used for backoff and diagnostics only.
  * @param newUuid Source of identifiers; injected so that tests can make them predictable.
@@ -63,6 +70,7 @@ internal class CollectionWorker(
     private val adapter: CollectionAdapter,
     private val scopeState: MutableStateFlow<ScopeState>,
     private val metrics: SyncMetrics,
+    private val log: SyncLogger,
     private val coroutineScope: CoroutineScope,
     private val clock: Clock,
     private val newUuid: () -> Uuid = { Uuid.random() },
@@ -72,17 +80,36 @@ internal class CollectionWorker(
 
     private val requests = Channel<Unit>(Channel.CONFLATED)
     private val declined = mutableSetOf<ConflictId>()
-    private val conflicts = ConflictCoordinator(scope, collection, stores, transactions, adapter, newUuid)
+    private val conflicts = ConflictCoordinator(scope, collection, stores, transactions, adapter, log, newUuid)
 
     private var limits: SyncLimits? = null
     private var clientId: ClientId? = null
+
+    /**
+     * Whether the collection was already known to be stuck at the end of the previous cycle.
+     *
+     * Kept so that a queue nobody can unblock is reported when it becomes stuck rather than on every
+     * timer tick for as long as it stays that way. It lives on the worker because the coordinators
+     * are rebuilt every cycle and would have forgotten by the next one.
+     */
+    private var queueWasBlocked = false
 
     /** Starts the loop. Cancelling the coroutine scope stops it. */
     fun start() {
         coroutineScope.launch {
             for (request in requests) {
                 runCatching { cycle() }
-                    .onFailure { failure -> lastFailure.value = SyncFailure.Local(failure.message ?: "local failure") }
+                    .onFailure { failure ->
+                        // The only place the stack trace of a fault inside the application's adapter
+                        // or its database is ever visible: what reaches the application through
+                        // `lastFailure` is a description, and a description of a `NullPointerException`
+                        // is of no use to anybody.
+                        log.error(SyncLogEvent.CYCLE_FAILED, failure) {
+                            "the cycle threw; the transaction was rolled back and the collection is unchanged"
+                        }
+                        lastFailure.value =
+                            SyncFailure.Local(failure.message ?: "the application's code threw", failure)
+                    }
             }
         }
     }
@@ -93,6 +120,8 @@ internal class CollectionWorker(
     }
 
     private suspend fun cycle() {
+        val startedAt = clock.now()
+        log.debug(SyncLogEvent.CYCLE_STARTED) { "a synchronisation cycle began" }
         val limits = limits() ?: return
         val clientId = clientId()
 
@@ -108,6 +137,8 @@ internal class CollectionWorker(
                 limits,
                 BackoffPolicy(),
                 metrics,
+                log,
+                { failure -> lastFailure.value = failure },
                 clock,
                 newUuid,
             )
@@ -122,6 +153,7 @@ internal class CollectionWorker(
                 adapter,
                 limits,
                 metrics,
+                log,
                 clock,
                 newUuid,
             )
@@ -135,6 +167,7 @@ internal class CollectionWorker(
                 adapter,
                 limits,
                 metrics,
+                log,
                 clock,
                 newUuid,
             )
@@ -153,7 +186,7 @@ internal class CollectionWorker(
             PullOutcome.UpToDate -> lastFailure.value = null
         }
         offerConflicts()
-        reportQueue()
+        reportQueue(startedAt)
     }
 
     /**
@@ -164,12 +197,68 @@ internal class CollectionWorker(
      * different kind of wrong from a number that is merely a moment old. Both queries are the ones
      * the collection's state flow already runs, so the cycle pays nothing new for them.
      */
-    private suspend fun reportQueue() {
-        val (pending, open) =
+    private suspend fun reportQueue(startedAt: Instant) {
+        val summary =
             transactions.transaction {
-                stores.records.pendingCount(scope, collection) to stores.conflicts.openIds(scope, collection).size
+                CycleSummary(
+                    pending = stores.records.pendingCount(scope, collection),
+                    open = stores.conflicts.openIds(scope, collection).size,
+                    headState = stores.groups.head(scope, collection)?.state,
+                )
             }
-        metrics.emit(SyncMetricEvent.QueueObserved(scope, collection, pending, open))
+        metrics.emit(SyncMetricEvent.QueueObserved(scope, collection, summary.pending, summary.open), log)
+        reportBlockedQueue(summary)
+        log.debug(
+            SyncLogEvent.CYCLE_FINISHED,
+            context = {
+                mapOf(
+                    "pending" to summary.pending.toString(),
+                    "conflicts" to summary.open.toString(),
+                    "head" to (summary.headState?.name ?: "none"),
+                    "tookMs" to (clock.now() - startedAt).inWholeMilliseconds.toString(),
+                )
+            },
+        ) { "the cycle ended" }
+    }
+
+    /**
+     * Says so, once, when the queue has stopped being something the library can move.
+     *
+     * A head that is conflicted or refused is the library's one genuinely silent failure: every
+     * group behind it waits, the collection still calls itself live, and nothing changes until the
+     * application resolves the conflict or corrects the data. A head serving a backoff is
+     * deliberately not reported — it is a wait, not a stall, and saying so on every timer tick
+     * during an outage would bury the case that matters.
+     *
+     * @param summary What the end of the cycle found.
+     */
+    private fun reportBlockedQueue(summary: CycleSummary) {
+        val blocked = summary.headState == PushGroupState.FAILED || summary.headState == PushGroupState.CONFLICTED
+        if (blocked && !queueWasBlocked) {
+            log.warn(
+                SyncLogEvent.QUEUE_BLOCKED,
+                context = {
+                    mapOf(
+                        "head" to summary.headState.name,
+                        "pending" to summary.pending.toString(),
+                        "conflicts" to summary.open.toString(),
+                    )
+                },
+            ) {
+                when (summary.headState) {
+                    PushGroupState.CONFLICTED -> {
+                        "the queue is blocked: its oldest group is waiting for conflicts to be resolved, " +
+                            "and every group behind it waits with it"
+                    }
+
+                    else -> {
+                        "the queue is blocked: its oldest group was refused permanently, and nothing will " +
+                            "leave this collection until the application corrects the data"
+                    }
+                }
+            }
+        }
+        queueWasBlocked = blocked
     }
 
     /**
@@ -187,14 +276,32 @@ internal class CollectionWorker(
      */
     private suspend fun reconcileSchema() {
         val declared = adapter.schema ?: return
-        transactions.transaction {
-            val stored = stores.collections.ensure(scope, collection).schemaFingerprint
-            if (stored == declared) {
-                return@transaction
-            }
-            stores.collections.setSchemaFingerprint(scope, collection, declared)
-            if (stored != null) {
+        var previous: SchemaFingerprint? = null
+        val rebuilding =
+            transactions.transaction {
+                val stored = stores.collections.ensure(scope, collection).schemaFingerprint
+                if (stored == declared) {
+                    return@transaction false
+                }
+                stores.collections.setSchemaFingerprint(scope, collection, declared)
+                if (stored == null) {
+                    return@transaction false
+                }
+                previous = stored
                 stores.collections.setPhase(scope, collection, SyncPhase.RESYNC_REQUIRED)
+                true
+            }
+        // Said after the transaction rather than inside it: a sink is the application's code and
+        // must never run with a write lock held. A collection that is about to transfer its whole
+        // contents again is worth an explanation — this is one of four unrelated reasons for it, and
+        // without naming which, an unexplained bootstrap is unattributable.
+        if (rebuilding) {
+            log.info(
+                SyncLogEvent.SCHEMA_CHANGED,
+                context = { mapOf("from" to previous?.value.orEmpty(), "to" to declared.value) },
+            ) { "the adapter declares a different schema than this collection was synchronised under" }
+            log.info(SyncLogEvent.RESYNC_REQUIRED, context = { mapOf("reason" to "schema") }) {
+                "the collection will be rebuilt from a snapshot because its schema fingerprint changed"
             }
         }
     }
@@ -273,6 +380,9 @@ internal class CollectionWorker(
         return try {
             transport.limits().also { limits = it }
         } catch (failure: SyncTransportFailure) {
+            log.warn(SyncLogEvent.REQUEST_FAILED, failure) {
+                "the server's limits could not be read, so nothing is sent or applied this cycle"
+            }
             recordFailure(failure)
             null
         }
@@ -290,6 +400,9 @@ internal class CollectionWorker(
     }
 
     private fun interrupt(failure: SyncTransportFailure) {
+        log.warn(SyncLogEvent.REQUEST_FAILED, failure) {
+            "the scope can no longer be synchronised; the workers stop and the queue is kept"
+        }
         scopeState.value =
             when (failure) {
                 is SyncTransportFailure.Revoked -> ScopeState.Revoked
@@ -298,29 +411,83 @@ internal class CollectionWorker(
         recordFailure(failure)
     }
 
+    /**
+     * Translates a transport failure into what the application is told.
+     *
+     * Exhaustive on purpose rather than falling back on a catch-all. A catch-all is how three
+     * failures the protocol names — refused credentials, a revoked scope and a cursor outside the
+     * retention window — were reported as a server error with the status code zero, which is a
+     * value no server has ever answered with and an application cannot act on. A new transport
+     * failure should stop the compiler here and be decided about, not be absorbed.
+     *
+     * @param failure What the transport reported.
+     */
     private fun recordFailure(failure: SyncTransportFailure) {
         lastFailure.value =
             when (failure) {
                 is SyncTransportFailure.Unreachable -> {
                     scopeState.compareAndSet(ScopeState.Online, ScopeState.Offline)
-                    SyncFailure.Network(failure.message.orEmpty())
+                    SyncFailure.Network(failure.describe(), failure.cause)
                 }
 
                 is SyncTransportFailure.ServerError -> {
-                    SyncFailure.Server(failure.statusCode, failure.message.orEmpty())
+                    SyncFailure.Server(failure.statusCode, failure.describe())
                 }
 
                 is SyncTransportFailure.RateLimited -> {
-                    SyncFailure.Server(TOO_MANY_REQUESTS, failure.message.orEmpty())
+                    SyncFailure.Server(TOO_MANY_REQUESTS, failure.describe())
                 }
 
-                else -> {
-                    SyncFailure.Server(0, failure.message.orEmpty())
+                is SyncTransportFailure.Unauthorized -> {
+                    SyncFailure.AuthRequired(failure.describe())
+                }
+
+                is SyncTransportFailure.Revoked -> {
+                    SyncFailure.Revoked(failure.describe())
+                }
+
+                // Reported as the status it arrived as. The application does nothing about it — the
+                // library bootstraps on its own — so it needs a case of its own even less than it
+                // needs a fictitious status code.
+                is SyncTransportFailure.CursorTooOld -> {
+                    SyncFailure.Server(GONE, failure.describe())
                 }
             }
     }
 
+    /**
+     * Describes a transport failure without producing an empty string.
+     *
+     * A blank description is the worst of the three possible answers: it says there was a failure
+     * and refuses to say anything about it, which reads on a screen as a bug in this library.
+     *
+     * @return The failure's own message, the message of what caused it, or the name of its case.
+     */
+    private fun SyncTransportFailure.describe(): String =
+        message?.takeIf { it.isNotBlank() }
+            ?: cause?.message?.takeIf { it.isNotBlank() }
+            ?: this::class.simpleName.orEmpty()
+
+    /**
+     * What the end of one cycle found in the database.
+     *
+     * Read in a single transaction because the three values are reported together and a queue depth
+     * that disagreed with the head it belongs to would be worse than a moment-old one.
+     *
+     * @property pending Local changes that have not reached the server.
+     * @property open Conflicts waiting for the application to decide.
+     * @property headState State of the oldest group in the queue, or `null` when the queue is empty.
+     */
+    private data class CycleSummary(
+        val pending: Int,
+        val open: Int,
+        val headState: PushGroupState?,
+    )
+
     private companion object {
         const val TOO_MANY_REQUESTS = 429
+
+        /** What the server answers for a cursor it no longer keeps history for. */
+        const val GONE = 410
     }
 }

@@ -2,6 +2,8 @@ package dev.voir.reflector.sync.engine.pull
 
 import dev.voir.reflector.sync.core.SyncPhase
 import dev.voir.reflector.sync.core.adapter.RemoteOp
+import dev.voir.reflector.sync.core.log.RecordingSyncLog
+import dev.voir.reflector.sync.core.log.SyncLogger
 import dev.voir.reflector.sync.core.transport.SyncTransportFailure
 import dev.voir.reflector.sync.engine.FakeAdapter
 import dev.voir.reflector.sync.engine.FakeTransport
@@ -41,6 +43,10 @@ import kotlin.uuid.Uuid
 class PullCoordinatorTest {
     private val scope = ScopeId("user-1")
     private val collection = CollectionId("ledger")
+
+    /** Sink the coordinator's own account of what it did goes to, so a test can read it back. */
+    private val logs = RecordingSyncLog()
+    private val log = SyncLogger(logs, scope, collection)
     private val wallet = EntityType("wallet")
     private val us = ClientId(Uuid.parse("00000000-0000-7000-8000-0000000000c1"))
     private val them = ClientId(Uuid.parse("00000000-0000-7000-8000-0000000000c2"))
@@ -57,7 +63,7 @@ class PullCoordinatorTest {
 
     private val metrics = RecordingMetrics()
 
-    private val mutations = MutationCoordinator(stores, transactions) { GroupId(uuids()) }
+    private val mutations = MutationCoordinator(stores, transactions, log) { GroupId(uuids()) }
 
     /**
      * Builds a coordinator over the storage the tests share.
@@ -77,6 +83,7 @@ class PullCoordinatorTest {
             adapter = adapter,
             limits = transport.limits,
             metrics = metrics,
+            log = log,
             clock = clock,
             newUuid = uuids,
         )

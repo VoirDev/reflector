@@ -1,8 +1,13 @@
 package dev.voir.reflector.sync.engine.push
 
+import dev.voir.reflector.sync.core.SyncFailure
 import dev.voir.reflector.sync.core.adapter.SyncRejection
 import dev.voir.reflector.sync.core.conflict.ConflictId
 import dev.voir.reflector.sync.core.conflict.ConflictOrigin
+import dev.voir.reflector.sync.core.log.RecordingSyncLog
+import dev.voir.reflector.sync.core.log.SyncLogEvent
+import dev.voir.reflector.sync.core.log.SyncLogLevel
+import dev.voir.reflector.sync.core.log.SyncLogger
 import dev.voir.reflector.sync.core.metrics.PushMetricOutcome
 import dev.voir.reflector.sync.core.metrics.SyncMetricEvent
 import dev.voir.reflector.sync.core.transport.SyncTransportFailure
@@ -51,6 +56,10 @@ import kotlin.uuid.Uuid
 class PushCoordinatorTest {
     private val scope = ScopeId("user-1")
     private val collection = CollectionId("ledger")
+
+    /** Sink the coordinator's own account of what it did goes to, so a test can read it back. */
+    private val logs = RecordingSyncLog()
+    private val log = SyncLogger(logs, scope, collection)
     private val wallet = EntityType("wallet")
 
     private val database = openTestDatabase()
@@ -65,7 +74,10 @@ class PushCoordinatorTest {
 
     private val metrics = RecordingMetrics()
 
-    private val mutations = MutationCoordinator(stores, transactions) { GroupId(uuids()) }
+    private val mutations = MutationCoordinator(stores, transactions, log) { GroupId(uuids()) }
+
+    /** Failures the coordinator asked the worker to publish, in order. */
+    private val reported = mutableListOf<SyncFailure>()
 
     private fun coordinator(maxDependencyMerges: Int = 8) =
         PushCoordinator(
@@ -79,6 +91,8 @@ class PushCoordinatorTest {
             limits = transport.limits,
             backoff = BackoffPolicy(random = Random(1)),
             metrics = metrics,
+            log = log,
+            reportFailure = { reported += it },
             clock = clock,
             newUuid = uuids,
             maxDependencyMerges = maxDependencyMerges,
@@ -323,6 +337,118 @@ class PushCoordinatorTest {
             assertEquals(wallet, type)
             assertEquals(entity(1), id)
             assertIs<SyncRejection.Validation>(rejection)
+        }
+
+    @Test
+    fun `a permanent refusal becomes the failure the application sees`() =
+        runTest {
+            adapter.bodies[wallet to entity(1)] = body("Cash")
+            mutations.mutate(scope, collection) { markUpserted(wallet, entity(1)) }
+            transport.onPush = { request ->
+                PushResponse(
+                    results =
+                        listOf(
+                            PushGroupResult.Rejected(
+                                groupId = request.groups.single().groupId,
+                                error =
+                                    RejectError(
+                                        code = RejectCode.VALIDATION,
+                                        entity = wallet,
+                                        id = entity(1),
+                                        message = "currency is required",
+                                    ),
+                            ),
+                        ),
+                    latestSeq = BatchSeq("1"),
+                )
+            }
+
+            coordinator().pushOnce()
+
+            // The queue stops here until the application rewrites the data, which is the most
+            // consequential thing this library does — and until now it reached only the adapter's
+            // callback, leaving the published state saying the last attempt had succeeded.
+            val failure = assertIs<SyncFailure.Rejected>(reported.single())
+            assertEquals(wallet, failure.entityType)
+            assertEquals(entity(1), failure.entityId)
+            assertIs<SyncRejection.Validation>(failure.rejection)
+            assertEquals("currency is required", failure.message)
+        }
+
+    @Test
+    fun `a permanent refusal is reported with the code and the entity it was about`() =
+        runTest {
+            adapter.bodies[wallet to entity(1)] = body("Cash")
+            mutations.mutate(scope, collection) { markUpserted(wallet, entity(1)) }
+            transport.onPush = { request ->
+                PushResponse(
+                    results =
+                        listOf(
+                            PushGroupResult.Rejected(
+                                groupId = request.groups.single().groupId,
+                                error =
+                                    RejectError(
+                                        code = RejectCode.VALIDATION,
+                                        entity = wallet,
+                                        id = entity(1),
+                                        message = "currency is required",
+                                    ),
+                            ),
+                        ),
+                    latestSeq = BatchSeq("1"),
+                )
+            }
+
+            coordinator().pushOnce()
+
+            // A refusal is the collection's most consequential silence: the queue stops here until
+            // the application rewrites the data, so the record has to say which change and why.
+            val rejection = assertNotNull(logs.records.value.singleOrNull { it.event == SyncLogEvent.PUSH_REJECTED })
+            assertEquals(SyncLogLevel.ERROR, rejection.level)
+            assertEquals(collection, rejection.collection)
+            assertEquals(RejectCode.VALIDATION.value, rejection.context["code"])
+            assertEquals(wallet.value, rejection.context["entity"])
+            assertTrue("currency is required" in rejection.message, "the server's reason has to survive")
+        }
+
+    @Test
+    fun `nothing reported about a push carries the document being pushed`() =
+        runTest {
+            // The library sends the application's business data to the server; a log is not a second
+            // place for it to leave the device. Entities are described by type, identifier and size.
+            val secret = "iban-NL91ABNA0417164300"
+            adapter.bodies[wallet to entity(1)] = body(secret)
+            mutations.mutate(scope, collection) { markUpserted(wallet, entity(1)) }
+            transport.onPush = { request ->
+                PushResponse(
+                    results =
+                        listOf(
+                            PushGroupResult.Conflict(
+                                groupId = request.groups.single().groupId,
+                                conflicts =
+                                    listOf(
+                                        ConflictEntry(
+                                            entity = wallet,
+                                            id = entity(1),
+                                            serverVersion = EntityVersion("7"),
+                                            data = body("server-$secret"),
+                                        ),
+                                    ),
+                            ),
+                        ),
+                    latestSeq = BatchSeq("7"),
+                )
+            }
+
+            coordinator().pushOnce()
+
+            assertTrue(logs.records.value.isNotEmpty(), "the attempt has to have been reported at all")
+            for (record in logs.records.value) {
+                assertTrue(secret !in record.message, "a document reached a message: ${record.message}")
+                for ((key, value) in record.context) {
+                    assertTrue(secret !in value, "a document reached the context under '$key'")
+                }
+            }
         }
 
     @Test

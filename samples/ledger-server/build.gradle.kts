@@ -21,6 +21,11 @@ dependencies {
     implementation(libs.postgresql.driver)
     implementation(libs.hikaricp)
 
+    // The host's logging backend, and the module's only connection to it. server-sdk depends on no
+    // logging library at all: it reports through the SyncLog port, and Slf4jSyncLog in this module
+    // is the adapter. Ktor and Flyway bring slf4j-api along, so only the backend is declared here.
+    implementation(libs.logback.classic)
+
     // The host creates the Database itself and hands it to the module: the module never picks
     // up Exposed's global default.
     implementation(platform(libs.exposed.bom))

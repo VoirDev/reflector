@@ -5,6 +5,8 @@ import dev.voir.reflector.sync.core.adapter.CollectionAdapter
 import dev.voir.reflector.sync.core.adapter.RemoteOp
 import dev.voir.reflector.sync.core.conflict.ConflictId
 import dev.voir.reflector.sync.core.conflict.ConflictOrigin
+import dev.voir.reflector.sync.core.log.SyncLogEvent
+import dev.voir.reflector.sync.core.log.SyncLogger
 import dev.voir.reflector.sync.core.metrics.SyncMetricEvent
 import dev.voir.reflector.sync.core.metrics.SyncMetrics
 import dev.voir.reflector.sync.core.metrics.emit
@@ -43,6 +45,7 @@ import kotlin.uuid.Uuid
  * @param limits Limits published by the server; the snapshot is read in pages of the same size as
  *   the log, because the server publishes no separate limit for it.
  * @param metrics Sink for what a completed bootstrap transferred and how long it took.
+ * @param log Sink for the progress of the transfer, bound to this collection.
  * @param clock Source of local time, used only for diagnostics.
  * @param newUuid Source of identifiers; injected so that tests can make them predictable.
  */
@@ -55,6 +58,7 @@ internal class BootstrapCoordinator(
     private val adapter: CollectionAdapter,
     private val limits: SyncLimits,
     private val metrics: SyncMetrics,
+    private val log: SyncLogger,
     private val clock: Clock,
     private val newUuid: () -> Uuid,
 ) {
@@ -69,6 +73,25 @@ internal class BootstrapCoordinator(
         var page = start.page
         var cursor = start.cursor
         var items = 0
+
+        // The longest thing this library ever does, and the one most likely to be blamed for a
+        // device that seems busy doing nothing. Whether it is a fresh transfer or one a restart
+        // interrupted is the first thing worth knowing about it.
+        log.info(
+            SyncLogEvent.BOOTSTRAP_STARTED,
+            context = {
+                mapOf(
+                    "generation" to start.generation.toString(),
+                    "resumed" to (start.page != null).toString(),
+                )
+            },
+        ) {
+            if (start.page == null) {
+                "transferring a snapshot of the whole collection"
+            } else {
+                "resuming a snapshot transfer that was interrupted before it finished"
+            }
+        }
 
         while (true) {
             val snapshot =
@@ -90,6 +113,16 @@ internal class BootstrapCoordinator(
             }
             cursor = fixedCursor
             items += snapshot.items.size
+            log.debug(
+                SyncLogEvent.BOOTSTRAP_PAGE_APPLIED,
+                context = {
+                    mapOf(
+                        "items" to snapshot.items.size.toString(),
+                        "itemsSoFar" to items.toString(),
+                        "hasMore" to snapshot.hasMore.toString(),
+                    )
+                },
+            ) { "a page of the snapshot was applied" }
 
             if (!snapshot.hasMore) {
                 break
@@ -108,7 +141,12 @@ internal class BootstrapCoordinator(
         // Only a bootstrap that finished is reported, and it reports its own pages alone: a run
         // resumed after an interruption did not transfer what the run before it already applied,
         // and adding those in would describe work nobody did.
-        metrics.emit(SyncMetricEvent.BootstrapCompleted(scope, collection, items, clock.now() - startedAt))
+        val took = clock.now() - startedAt
+        metrics.emit(SyncMetricEvent.BootstrapCompleted(scope, collection, items, took), log)
+        log.info(
+            SyncLogEvent.BOOTSTRAP_FINISHED,
+            context = { mapOf("items" to items.toString(), "tookMs" to took.inWholeMilliseconds.toString()) },
+        ) { "the snapshot is applied and the collection follows the change log again" }
         return BootstrapOutcome.Completed
     }
 
@@ -196,6 +234,17 @@ internal class BootstrapCoordinator(
                 serverVersion = item.version,
                 detectedAt = clock.now().toEpochMilliseconds(),
             )
+        log.warn(
+            SyncLogEvent.CONFLICT_OPENED,
+            context = {
+                mapOf(
+                    "entity" to item.entity.value,
+                    "id" to item.id.value.toString(),
+                    "origin" to ConflictOrigin.PULL.name,
+                    "serverVersion" to item.version.value,
+                )
+            },
+        ) { "the snapshot disagrees with a local edit that never reached the server" }
         stores.records.setConflict(scope, collection, item.entity, item.id, conflictId)
     }
 
@@ -204,6 +253,12 @@ internal class BootstrapCoordinator(
         if (stale.isEmpty()) {
             return
         }
+        // Rows the application is about to lose, on the library's say-so. Worth a line: a sweep that
+        // removes far more than expected is what a wrong generation looks like from the outside.
+        log.info(
+            SyncLogEvent.BOOTSTRAP_SWEPT,
+            context = { mapOf("deleted" to stale.size.toString(), "generation" to generation.toString()) },
+        ) { "entities the snapshot did not mention were deleted from the application's tables" }
         adapter.applyRemote(stale.map { RemoteOp.Delete(it.entityType, it.entityId) })
         stores.records.deleteStale(scope, collection, generation)
     }
@@ -215,6 +270,9 @@ internal class BootstrapCoordinator(
             }
 
             else -> {
+                log.warn(SyncLogEvent.REQUEST_FAILED, failure) {
+                    "the snapshot transfer stopped; what it applied so far is kept and it resumes from there"
+                }
                 transactions.transaction {
                     stores.collections.recordFailure(scope, collection, failure.message.orEmpty())
                 }

@@ -9,7 +9,8 @@ import kotlin.time.Duration
  *
  * The set is closed and small, and every entry is a number the host cannot obtain from outside the
  * module: how long writers waited on each other, how far behind its clients are running, how much
- * history a collection is carrying, and how often a client has to be sent back to a snapshot.
+ * history a collection is carrying, how often a client has to be sent back to a snapshot, and what
+ * an erasure took away.
  *
  * Durations come from the module's clock. They are diagnostics: nothing in the module reads them
  * back, and no decision depends on them.
@@ -126,5 +127,41 @@ public sealed class SyncMetricEvent {
         override val collection: CollectionId,
         public val removedBatches: Int,
         public val retainedSpan: Long,
+    ) : SyncMetricEvent()
+
+    /**
+     * A client was refused because it is still following a collection that was purged.
+     *
+     * The count belongs with [CollectionPurged] and is read after it: an erasure is not finished
+     * when the rows are gone but when the last installation has stopped carrying them, and this is
+     * the only place that fact is observable. It should spike after a purge and then fall to
+     * nothing. One that keeps arriving is a device that never completes its rebuild.
+     *
+     * @property scope Scope the client addressed.
+     * @property collection Collection the client addressed.
+     */
+    public data class CollectionResetRefused(
+        override val scope: ScopeId,
+        override val collection: CollectionId,
+    ) : SyncMetricEvent()
+
+    /**
+     * A collection was purged, and every row of it is gone from the database.
+     *
+     * Counted apart from [HistoryTrimmed] because the two are not the same kind of removal and must
+     * not be summed: trimming is the window doing its work, while this is data that was erased on
+     * the host's instruction and is not coming back. On a dashboard it is the line that says an
+     * erasure ran at all, which is the first question asked when a scope turns up empty.
+     *
+     * @property scope Scope that was purged.
+     * @property collection Collection that was purged.
+     * @property removedEntities Entity rows deleted, tombstones included.
+     * @property removedBatches Log batches deleted.
+     */
+    public data class CollectionPurged(
+        override val scope: ScopeId,
+        override val collection: CollectionId,
+        public val removedEntities: Int,
+        public val removedBatches: Int,
     ) : SyncMetricEvent()
 }

@@ -35,6 +35,9 @@ internal object PushResultsTable : UuidTable("sync.push_results") {
 
     init {
         uniqueIndex("uq_push_results__client_id__group_id", clientId, groupId)
+        // The idempotency constraint above leads with the client, so it cannot serve a purge, which
+        // deletes by collection — as does the cascade from the collection row.
+        index("ix_push_results__collection_id", isUnique = false, collection)
     }
 
     /** Longest status code stored. */

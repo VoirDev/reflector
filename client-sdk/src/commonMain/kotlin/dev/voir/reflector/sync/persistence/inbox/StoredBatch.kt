@@ -2,6 +2,7 @@ package dev.voir.reflector.sync.persistence.inbox
 
 import dev.voir.reflector.sync.protocol.BatchSeq
 import dev.voir.reflector.sync.protocol.ClientId
+import dev.voir.reflector.sync.protocol.Cursor
 
 /**
  * One downloaded server transaction with its operations.
@@ -14,6 +15,7 @@ import dev.voir.reflector.sync.protocol.ClientId
  */
 internal data class StoredBatch(
     public val seq: BatchSeq,
+    public val cursor: Cursor,
     public val originClientId: ClientId?,
     public val ops: List<InboxOperation>,
 )

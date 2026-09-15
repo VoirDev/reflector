@@ -184,6 +184,50 @@ public interface SyncCollectionDao {
     )
 
     /**
+     * Remembers which incarnation of the collection the server answered from.
+     *
+     * The statement is called on every answer but only writes when the value differs, and that is
+     * not a micro-optimisation: this row is observed as a flow, so a write on every page of every
+     * pull would wake the application's own state subscribers for a value that had not changed.
+     *
+     * @param scopeId Scope of the collection.
+     * @param collectionId Identifier of the collection.
+     * @param epoch Incarnation the server named.
+     */
+    @Query(
+        "UPDATE sync_collection SET epoch = :epoch " +
+            "WHERE scope_id = :scopeId AND collection_id = :collectionId " +
+            "AND (epoch IS NULL OR epoch <> :epoch)",
+    )
+    public suspend fun setEpoch(
+        scopeId: String,
+        collectionId: String,
+        epoch: String?,
+    )
+
+    /**
+     * Forgets everything that described the previous incarnation of the collection.
+     *
+     * The cursor, the epoch and any half-finished snapshot go together: each of them is a statement
+     * about a log that no longer exists, and a survivor of the three would send the next attempt
+     * back to the server talking about the collection that was erased.
+     *
+     * @param scopeId Scope of the collection.
+     * @param collectionId Identifier of the collection.
+     * @param phase Phase to enter, always [SyncPhase.RESYNC_REQUIRED].
+     */
+    @Query(
+        "UPDATE sync_collection SET cursor = NULL, epoch = NULL, bootstrap_page = NULL, phase = :phase, " +
+            "last_error = NULL, failure_count = 0 " +
+            "WHERE scope_id = :scopeId AND collection_id = :collectionId",
+    )
+    public suspend fun forgetIncarnation(
+        scopeId: String,
+        collectionId: String,
+        phase: SyncPhase,
+    )
+
+    /**
      * Records a failed attempt and grows the failure counter the backoff is computed from.
      *
      * @param scopeId Scope of the collection.

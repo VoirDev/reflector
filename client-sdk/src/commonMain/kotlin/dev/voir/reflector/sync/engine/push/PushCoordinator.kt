@@ -199,7 +199,13 @@ internal class PushCoordinator(
                     )
                 }
 
-        val outcome = transactions.transaction { apply(prepared, result) }
+        val outcome =
+            transactions.transaction {
+                // Recorded with the outcome so that a client which had no incarnation yet — one whose
+                // first contact with a collection is a push — is not left claiming none on the next.
+                stores.collections.setEpoch(scope, collection, response.epoch)
+                apply(prepared, result)
+            }
         // Reported after the transaction rather than inside it: a sink is the application's code,
         // and running it while a write lock is held is the one thing this library must never do.
         report(operations, result.toMetricOutcome(), startedAt)
@@ -388,7 +394,15 @@ internal class PushCoordinator(
 
         return Preparation.Ready(
             group = group,
-            request = PushRequest(clientId = clientId, groups = listOf(PushGroup(group.groupId, ops))),
+            request =
+                PushRequest(
+                    clientId = clientId,
+                    groups = listOf(PushGroup(group.groupId, ops)),
+                    // What these changes were made against. The server refuses the request outright
+                    // if that collection is gone, which is the only moment at which this queue can
+                    // still be stopped from re-creating data somebody erased.
+                    epoch = stores.collections.ensure(scope, collection).epoch,
+                ),
             sent = sent,
         )
     }
@@ -645,6 +659,13 @@ internal class PushCoordinator(
         val outcome =
             transactions.transaction {
                 when (failure) {
+                    is SyncTransportFailure.CollectionReset -> {
+                        // No backoff and no new attempt: the group is about to be discarded with the
+                        // rest of the collection, and re-sending it is the one thing that must not
+                        // happen.
+                        PushOutcome.ResetRequired
+                    }
+
                     is SyncTransportFailure.Unauthorized, is SyncTransportFailure.Revoked -> {
                         // The group goes back to the queue untouched: signing in again has to let it
                         // leave, and its identifier stays valid because the envelope never changed.

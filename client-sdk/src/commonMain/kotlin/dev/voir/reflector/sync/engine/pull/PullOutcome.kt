@@ -21,6 +21,14 @@ internal sealed class PullOutcome {
     data object BootstrapRequired : PullOutcome()
 
     /**
+     * The collection on the server has been replaced and the local copy of it is meaningless.
+     *
+     * Stronger than [BootstrapRequired]: that one keeps what never reached the server, this one
+     * cannot, because there is no longer a server state for those changes to be changes of.
+     */
+    data object ResetRequired : PullOutcome()
+
+    /**
      * The scope itself has to react before anything can be read.
      *
      * @property failure Reason the scope is not usable.

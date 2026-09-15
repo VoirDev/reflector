@@ -6,9 +6,10 @@ import kotlin.jvm.JvmInline
 /**
  * Opaque sequence token of one committed batch inside a collection.
  *
- * A batch is one server transaction, so the sequence is the unit of both ordering and cursor
- * progress: the client stores the sequence of the last applied batch as its cursor. Like a cursor,
- * the value is never parsed or ordered by the client.
+ * A batch is one server transaction, so the sequence is the unit of ordering. The value is never
+ * parsed or ordered by the client, and it is **not** a cursor: a cursor also says which incarnation
+ * of the collection the position belongs to, and the server serves one per batch rather than
+ * letting the client build one from this.
  *
  * @property value Opaque server-defined sequence token.
  */
@@ -16,14 +17,4 @@ import kotlin.jvm.JvmInline
 @JvmInline
 public value class BatchSeq(
     public val value: String,
-) {
-    /**
-     * Returns the cursor position reached after the batch with this sequence has been applied.
-     *
-     * Cursors and batch sequences share one token space by protocol contract; the conversion is
-     * explicit so that a cursor is never built from anything but an applied batch.
-     *
-     * @return Cursor pointing at this batch boundary.
-     */
-    public fun asCursor(): Cursor = Cursor(value)
-}
+)

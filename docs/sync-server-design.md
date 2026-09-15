@@ -82,6 +82,11 @@ Five operations cover the whole protocol. The host builds the transport on top o
 itself: mapping onto Ktor, Spring MVC or gRPC is its business, and the module knows nothing
 about it.
 
+Every answer names the collection's **incarnation** — `epoch` on `ChangesPage`, `SnapshotPage` and
+`PushResponse` — and a cursor carries it as well as a position. A push carries back the one the
+client believes in, and a request naming an incarnation that no longer exists is refused with
+`CollectionResetException` before anything is written. Section 10 says why.
+
 `limits()` serves the effective limits (`maxOperationsPerGroup`, `maxDocumentBytes`,
 `maxChangesPageSize`, the retention window) — the host publishes them through the
 `GET /v1/sync/config` endpoint. The client must know the limits before it assembles the
@@ -98,6 +103,16 @@ In addition, the module offers a read API for the host's administrative scenario
 interface SyncQueries {
     fun document(scope: ScopeId, collection: CollectionId, type: EntityType, id: Uuid): StoredDocument?
     fun documents(scope: ScopeId, collection: CollectionId, type: EntityType, page: PageToken?, limit: Int): DocumentPage
+}
+```
+
+And the removals the host schedules or orders, which are not protocol operations at all:
+
+```kotlin
+class SyncMaintenance {
+    fun trim(): Int
+    fun purgeScope(scope: ScopeId): PurgeReport
+    fun purgeCollection(scope: ScopeId, collection: CollectionId): PurgeReport
 }
 ```
 
@@ -185,6 +200,10 @@ change twice in one batch.
 4. `retention_floor_seq` grows monotonically and is raised **before** old batches are deleted.
 5. Listeners are called after the commit; their errors do not affect data already accepted.
 6. `ProjectionListener` is called inside the transaction; its failure rolls the batch back.
+7. A cursor names an incarnation as well as a position, and a cursor from another incarnation — or
+   one beyond the head of its own — is refused rather than answered.
+8. A push names the incarnation it was made against, and one naming any other is refused whole,
+   before a single group of it is applied.
 
 ## 6. Assigning order
 
@@ -290,7 +309,9 @@ it stays the recorded fallback until a real workload produces a group the ceilin
 
 ```
 tx (one consistent read):
+  if cursor's epoch ≠ this collection's   → CollectionReset  -- it was purged and began again
   read retention_floor_seq; if cursor < floor → CursorTooOld
+  read next_seq;            if cursor > head  → CollectionReset  -- the log went backwards
   SELECT batches WHERE collection = ? AND seq > cursor ORDER BY seq LIMIT n
   read their changes
 nextCursor = the largest seq on the page, hasMore = whether batches were cut off
@@ -354,7 +375,7 @@ cursor computed anew, and a client that took it would silently jump over everyth
 while the snapshot was being transferred. The module keeps no state between requests, so the
 token itself carries the position.
 
-## 10. Retention
+## 10. Retention and purge
 
 The history retention window and the cursor's lifetime are **the same number**. A client whose
 cursor fell out of the window goes to bootstrap anyway, so keeping history for longer is
@@ -393,6 +414,95 @@ the window discards it.
 Tombstones live for exactly the same window: a deleted entity is only needed by clients that
 can still arrive with a cursor inside the window. Everybody else learns about the deletion
 through the entity's absence from the snapshot and their own sweep.
+
+### Purge
+
+Retention is the window doing its work. **Purge is erasure**, and the two must not be confused: a
+pushed deletion leaves a tombstone the log carries so that clients can learn about it, and a purge
+leaves nothing at all. It exists because a host is eventually asked to state that a tenant's data is
+gone, and "gone" cannot mean a tombstone with the document still in it.
+
+```
+tx:
+  SELECT collections WHERE scope_id = ? [AND collection_id = ?] FOR UPDATE
+  DELETE push_results, changes, entities, batches of each  -- children first, counted
+  DELETE the collection row itself                          -- counter included
+```
+
+Four decisions are worth recording.
+
+**The collection row goes too, so the counter restarts at one.** The alternative — keeping the row
+with its `next_seq` and raising the floor to it — would preserve monotonic sequences for free, and
+was rejected because the row carries `scope_id`, which for most hosts is the user or tenant
+identifier they were asked to erase. A purge that leaves that behind is not one the host can stand
+behind.
+
+**Therefore a cursor beyond the head is refused.** That is the price of the decision above and it is
+paid on the read path, in one comparison: after a purge the log starts again at one, and a client
+that survived with a cursor from before it would be served an empty page for ever while the
+collection filled up behind it. Refusing sends it to a bootstrap, which is the only thing that gets
+it back — and it is the same refusal as a stale cursor, because the client's answer to both is the
+same.
+
+**The rows are deleted explicitly, not left to `ON DELETE CASCADE`.** The cascade would remove the
+same rows and report nothing, and a purge whose extent cannot be stated is one the host cannot put
+in its own audit trail. `PurgeReport` is what it says instead. The one index the schema lacked for
+this — `ix_push_results__collection_id` — was added with it: that table's only constraint leads with
+`client_id`, so both the explicit delete and the cascade would otherwise scan it whole.
+
+**Unregistered collections are purged too, and no listener is told.** A collection removed from
+`SyncConfig` can be reached by no other operation, so refusing to purge it would strand exactly the
+rows a host most wants gone. And there is no sequence a commit listener could be notified at; the
+host ordered the purge itself and knows it happened.
+
+### Telling the survivors
+
+A purge erases the server. What it cannot erase is the copy on every device that was synchronising,
+and those devices go on pushing. The worker on a client pushes before it pulls, so a client that
+only learned about the purge from a read would already have put its queue back into the empty
+collection — and the server could not tell those writes from ordinary new ones.
+
+So the collection's **incarnation** is part of the protocol. It is the collection row's own
+identifier, which is random per row and which a purge deletes with the row, so a re-created
+collection is a different incarnation without the schema carrying a counter anybody could forget to
+bump. It is published on every answer, it is half of every cursor, and a push carries back the one
+the client believes in:
+
+```
+push:      request.epoch  ≠ the collection row's id, or no such row → CollectionReset, nothing applied
+changes:   cursor's epoch ≠ the collection row's id                 → CollectionReset
+snapshot:  page token's epoch ≠ the collection row's id             → CollectionReset
+```
+
+The host answers `409`, distinct from the `410` of a stale cursor, because the two ask the client
+for different things: `410` says rebuild and keep what you have not sent, `409` says rebuild and
+keep nothing. Collapsing them either loses a user's offline edits after an ordinary retention gap,
+or puts an erased collection back after a purge.
+
+Three details are worth stating because each was the alternative:
+
+**The epoch check reads the collection row rather than creating it.** A stale client arriving after
+a purge must not bring the scope's row — and its `scope_id` — back into the database it was erased
+from. Only a client that claims no incarnation at all, which is one that has never synchronised this
+collection, is allowed to create it.
+
+**A cursor carries the incarnation instead of the client carrying it separately.** A position is
+only a position in the log it was taken from, and the two travelling together is what makes it
+impossible for a caller to check one and forget the other. The client still treats the cursor as
+opaque: the server now serves one per batch — `ChangeBatch.cursor` — rather than letting the client
+build one from a sequence, which is what it used to do.
+
+**A cursor ahead of the head, with a matching incarnation, is refused too.** That is not a purge —
+it is a restore from a backup, the log having gone backwards under a client that is still ahead of
+it. The client's situation is the same, so the answer is the same.
+
+`SyncMetricEvent.CollectionResetRefused` counts these. It should spike after a purge and fall to
+nothing: an erasure is not finished when the rows are gone but when the last device has stopped
+carrying them, and this is the only place that is observable.
+
+What none of this does is make the purge survive a host that keeps serving the scope. A client that
+is refused simply rebuilds and starts again, and a user who then writes has made new data. Stopping
+that is what revoking access is for, and it is stated in the API rather than implied.
 
 ## 11. Events and projections
 
@@ -581,7 +691,8 @@ Every column holding a `kotlin.time.Instant` is declared as `TIMESTAMPTZ`.
 1. Resolve the `ScopeId` from its own access model before calling the module.
 2. Publish endpoints on top of the five operations and keep the WebSocket channel up.
 3. Fan `onCommitted` out between its instances and send invalidate to the clients.
-4. Run the retention maintenance operation on a schedule.
+4. Run the retention maintenance operation on a schedule, and stop serving a scope before it
+   purges one.
 5. Provide a `Database` and a connection pool, and run the module's migrations at start-up.
 6. Not wrap the module's calls in a transaction of its own.
 
@@ -596,5 +707,8 @@ Every column holding a `kotlin.time.Instant` is declared as `TIMESTAMPTZ`.
   gives either the full range or `CursorTooOld`, but never a partial range.
 - A patch-merge test: a field the server does not know survives a write from an old client, and
   an explicit `null` clears a field.
+- A purge test that counts rows in every table afterwards, one that checks a cursor issued before
+  the purge is refused rather than answered with an empty page, and one that checks a push naming
+  the purged incarnation writes nothing — including not re-creating the collection row.
 - The migrations are run by Flyway from an empty database, and the operations are then verified
   against that schema.

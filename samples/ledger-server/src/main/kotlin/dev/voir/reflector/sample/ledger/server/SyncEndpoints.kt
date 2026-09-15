@@ -7,6 +7,7 @@ import dev.voir.reflector.sync.protocol.ScopeId
 import dev.voir.reflector.sync.protocol.SyncProtocolJson
 import dev.voir.reflector.sync.protocol.events.SyncEventSerializer
 import dev.voir.reflector.sync.protocol.push.PushRequest
+import dev.voir.reflector.sync.server.CollectionResetException
 import dev.voir.reflector.sync.server.CursorTooOldException
 import dev.voir.reflector.sync.server.SyncServerException
 import dev.voir.reflector.sync.server.UnknownCollectionException
@@ -107,7 +108,10 @@ fun Application.syncEndpoints(
  *
  * The status codes are chosen for what the client can do about them: `401` means "get credentials",
  * `403` means "this scope is not yours any more" and makes a client wipe it, `410` means "your
- * cursor is gone, bootstrap". Collapsing them would cost the client its recoveries.
+ * cursor is gone, bootstrap", and `409` means "the collection you are following was purged" and
+ * makes a client discard it, unsent changes included. Collapsing them would cost the client its
+ * recoveries — and collapsing the last two would either lose a user's offline edits after an
+ * ordinary retention gap, or put an erased collection back after a purge.
  */
 private suspend fun RoutingContext.withScope(
     authorizer: ScopeAuthorizer,
@@ -140,6 +144,8 @@ private suspend fun RoutingContext.withScope(
         block(requested, collection)
     } catch (failure: CursorTooOldException) {
         call.respond(HttpStatusCode.Gone, failure.message.orEmpty())
+    } catch (failure: CollectionResetException) {
+        call.respond(HttpStatusCode.Conflict, failure.message.orEmpty())
     } catch (failure: UnknownCollectionException) {
         call.respond(HttpStatusCode.NotFound, failure.message.orEmpty())
     } catch (failure: SyncServerException) {

@@ -129,6 +129,8 @@ try {
     block(requested, collection)
 } catch (failure: CursorTooOldException) {
     call.respond(HttpStatusCode.Gone, failure.message.orEmpty())        // 410 → bootstrap
+} catch (failure: CollectionResetException) {
+    call.respond(HttpStatusCode.Conflict, failure.message.orEmpty())    // 409 → discard and rebuild
 } catch (failure: UnknownCollectionException) {
     call.respond(HttpStatusCode.NotFound, failure.message.orEmpty())
 } catch (failure: SyncServerException) {
@@ -140,8 +142,11 @@ try {
 ```
 
 `401` means "get credentials" and costs the client nothing; `403` means "this scope is not yours any
-more" and makes the client wipe it; `410` means "your cursor is gone, bootstrap". Collapsing any two
-of them costs the client one of its recoveries.
+more" and makes the client wipe it; `410` means "your cursor is gone, bootstrap"; `409` means "the
+collection you were following was purged" and makes the client discard it, unsent changes included.
+Collapsing any two of them costs the client one of its recoveries — and collapsing the last two
+either loses a user's offline edits after an ordinary retention gap, or puts an erased collection
+back after a purge.
 
 ## 1.5 Access control stays in the host
 
@@ -277,6 +282,36 @@ public interface SyncQueries {
 This is the read side for host screens and reports. It reflects the same rows the clients
 synchronise, without going through the protocol.
 
+## 1.10 Erasing a scope
+
+```kotlin
+// A user closed their account. Stop serving the scope first — a client that can still push will
+// re-create the collection from its own copy on the next request.
+authorizer.revoke(scope)
+val removed = module.maintenance.purgeScope(scope)
+log.info("erased {}: {} entities, {} batches", scope.value, removed.entities, removed.batches)
+```
+
+`purgeScope` and `purgeCollection` delete the rows outright — documents, log, tombstones, the
+idempotency history and the collection row itself. This is not the protocol's `delete`, which leaves
+a tombstone so that other clients can learn about the removal; there is nothing left to learn from
+afterwards, and nothing in the module can bring it back. The `PurgeReport` it hands back is what you
+put in your own audit trail.
+
+**Other devices erase themselves.** Every answer names the collection's incarnation, and a purge
+starts a new one. A device that was offline through the purge comes back, names the incarnation it
+knew, and is answered `409` — on its **push**, before anything it queued can be written. It then
+discards that collection: the rows, the cursor, the open conflicts and the changes it never managed
+to send, and rebuilds from the new snapshot. That last part is why the refusal has to happen on the
+push: a client learns about the purge before it has put any of its copy back, rather than after.
+
+It is the one case where the library destroys unsent work without being asked to, and it reports
+that at `WARN` with a count. If those edits matter more than the erasure does, do not let the device
+reach the scope: revoke its access first, which is the paragraph above.
+
+What this does not do is make a purge stick against a host that keeps serving the scope. A refused
+client rebuilds and syncs normally, and a user who writes afterwards has made new data.
+
 ---
 
 # Part 2 — The client
@@ -384,6 +419,33 @@ The seven `Sync*Entity` classes are the library's tables, and implementing `Sync
 gives it their DAOs. They live in *your* database because applying an incoming batch has to write
 business rows and advance the cursor in one transaction.
 
+That also means **the library's schema changes are your migrations**: your `@Database` owns the
+version number, so a release of the library that adds a column to one of its tables needs a version
+bump and a migration from you, exactly as one of your own tables would.
+
+Collection-reset detection added two: `sync_collection.epoch` and `sync_inbox_batch.cursor`. It also
+changed the shape of the cursor itself — a position now names the incarnation of the collection it
+belongs to — so the tokens already stored are not ones the server can read back. An installation
+upgrading across that release needs the columns *and* a clean slate for the tokens:
+
+```kotlin
+val MIGRATION_1_2 = object : Migration(1, 2) {
+    override fun migrate(connection: SQLiteConnection) {
+        connection.execSQL("ALTER TABLE sync_collection ADD COLUMN epoch TEXT")
+        connection.execSQL("ALTER TABLE sync_inbox_batch ADD COLUMN cursor TEXT NOT NULL DEFAULT ''")
+        // Downloaded-but-unapplied batches and the cursors that point at them are in the old shape.
+        // Both are re-derivable from the server, so they are dropped rather than translated.
+        connection.execSQL("DELETE FROM sync_inbox_op")
+        connection.execSQL("DELETE FROM sync_inbox_batch")
+        connection.execSQL("UPDATE sync_collection SET cursor = NULL, phase = 'RESYNC_REQUIRED'")
+    }
+}
+```
+
+Every collection then bootstraps once, on the next cycle. **Unsent local changes survive this** —
+a bootstrap's sweep does not touch dirty records, and the queue is left alone; only the `409` of an
+actual purge discards them.
+
 The cost is visible and worth stating plainly: every version of the library's schema is a version of
 your database, and migrating it is your job.
 
@@ -441,7 +503,8 @@ val channel = KtorSyncEventChannel(http, baseUrl, tokens)
 
 `syncHttpClient` is not a convenience: a client that drops nulls turns "clear this field" into
 "leave it alone" once the server merges the patch, and `expectSuccess = false` is required because
-`409`, `410` and `429` are part of the protocol rather than failures to throw.
+`409`, `410` and `429` are part of the protocol rather than failures to throw — `409` in particular
+is how a client is told the collection it follows was purged.
 
 Tokens come from your session layer:
 
@@ -705,9 +768,10 @@ Server:
 1. `SyncMigrations.migrate` before the first call to the module.
 2. A `Database` you created; never Exposed's global default.
 3. Every entity type registered in its `CollectionSpec`.
-4. `401` / `403` / `410` distinguishable in your routes.
+4. `401` / `403` / `409` / `410` distinguishable in your routes.
 5. A commit listener wired to whatever delivers notifications.
 6. `maintenance.trim()` on a schedule you own.
+7. `maintenance.purgeScope` wired to whatever closes an account, after access is revoked.
 
 Client:
 

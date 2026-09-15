@@ -23,6 +23,7 @@ import dev.voir.reflector.sync.persistence.RoomSyncTransactionRunner
 import dev.voir.reflector.sync.persistence.SyncStores
 import dev.voir.reflector.sync.persistence.group.PushGroupState
 import dev.voir.reflector.sync.protocol.BatchSeq
+import dev.voir.reflector.sync.protocol.CollectionEpoch
 import dev.voir.reflector.sync.protocol.CollectionId
 import dev.voir.reflector.sync.protocol.Cursor
 import dev.voir.reflector.sync.protocol.EntityId
@@ -145,7 +146,7 @@ class SyncEngineTest {
 
     private fun emptySnapshot(): SnapshotPage {
         snapshots++
-        return SnapshotPage(Cursor("0"), emptyList(), nextPage = null, hasMore = false)
+        return SnapshotPage(testCursor("0"), emptyList(), nextPage = null, hasMore = false, epoch = TEST_EPOCH)
     }
 
     private fun engine(
@@ -186,6 +187,7 @@ class SyncEngineTest {
                             ),
                         ),
                     latestSeq = BatchSeq("42"),
+                    epoch = TEST_EPOCH,
                 )
             }
             val collection = engine(workers).scope(scopeId).collection(ledger)
@@ -213,6 +215,77 @@ class SyncEngineTest {
         }
 
     @Test
+    fun `a collection the server purged is discarded locally, unsent changes included`() =
+        runBlocking<Unit> {
+            // First the collection is ordinary: it bootstraps, and a local edit reaches the server.
+            transport.onSnapshot = { emptySnapshot() }
+            transport.onPush = { request ->
+                val group = request.groups.single()
+                PushResponse(
+                    results =
+                        listOf(
+                            PushGroupResult.Applied(
+                                groupId = group.groupId,
+                                versions = group.ops.map { AppliedVersion(it.entity, it.id, EntityVersion("1")) },
+                            ),
+                        ),
+                    latestSeq = BatchSeq("1"),
+                    epoch = TEST_EPOCH,
+                )
+            }
+            val collection = engine(workers).scope(scopeId).collection(ledger)
+            collection.mutate {
+                adapter.bodies[wallet to walletId] = buildJsonObject { put("title", "Cash") }
+                markUpserted(wallet, walletId)
+            }
+            collection.state.await("a live collection with nothing queued") {
+                it.pendingCount == 0 && it.phase == SyncPhase.LIVE
+            }
+            assertEquals(TEST_EPOCH, assertNotNull(stores.collections.find(scopeId, ledger)).epoch)
+
+            // Then the scope is purged on the server, and this device edits again while it is away.
+            // The queue it builds is what a client would otherwise push back into the empty
+            // collection — one entity at a time, undoing the erasure.
+            collection.mutate {
+                adapter.bodies[wallet to walletId] = buildJsonObject { put("title", "Edited offline") }
+                markUpserted(wallet, walletId)
+            }
+            transport.onPush = { throw SyncTransportFailure.CollectionReset("purged") }
+            transport.onChanges = { throw SyncTransportFailure.CollectionReset("purged") }
+            transport.onSnapshot = {
+                snapshots++
+                SnapshotPage(
+                    Cursor("$NEW_EPOCH_VALUE.0"),
+                    emptyList(),
+                    nextPage = null,
+                    hasMore = false,
+                    epoch = CollectionEpoch(NEW_EPOCH_VALUE),
+                )
+            }
+            collection.requestSync()
+
+            awaitRecord("the collection being discarded") { it.event == SyncLogEvent.COLLECTION_RESET }
+            collection.state.await("a live collection rebuilt from the new incarnation") {
+                it.phase == SyncPhase.LIVE && it.pendingCount == 0
+            }
+
+            val stored = assertNotNull(stores.collections.find(scopeId, ledger))
+            assertEquals(CollectionEpoch(NEW_EPOCH_VALUE), stored.epoch, "the device follows the new collection")
+            assertNull(
+                stores.records.find(scopeId, ledger, wallet, walletId),
+                "a record the new snapshot does not mention is swept with the collection it belonged to",
+            )
+            assertNull(
+                adapter.bodies[wallet to walletId],
+                "the application's own row goes with it: the server is the source of truth, and it has none",
+            )
+            assertTrue(
+                transport.pushes.none { it.epoch == CollectionEpoch(NEW_EPOCH_VALUE) },
+                "the abandoned edit must not be sent into the collection that replaced the purged one",
+            )
+        }
+
+    @Test
     fun `a refused group is explained by diagnostics, and the explanation survives a restart`() =
         runBlocking<Unit> {
             transport.onSnapshot = { emptySnapshot() }
@@ -232,6 +305,7 @@ class SyncEngineTest {
                             ),
                         ),
                     latestSeq = BatchSeq("1"),
+                    epoch = TEST_EPOCH,
                 )
             }
             val collection = engine(workers).scope(scopeId).collection(ledger)
@@ -308,6 +382,7 @@ class SyncEngineTest {
                         listOf(
                             ChangeBatch(
                                 seq = BatchSeq("1"),
+                                cursor = testCursor("1"),
                                 originClientId = null,
                                 ops =
                                     listOf(
@@ -320,8 +395,9 @@ class SyncEngineTest {
                                     ),
                             ),
                         ),
-                    nextCursor = Cursor("1"),
+                    nextCursor = testCursor("1"),
                     hasMore = false,
+                    epoch = TEST_EPOCH,
                 )
             }
             val collection = engine(workers).scope(scopeId).collection(ledger)
@@ -353,6 +429,7 @@ class SyncEngineTest {
                             ),
                         ),
                     latestSeq = BatchSeq("1"),
+                    epoch = TEST_EPOCH,
                 )
             }
             val collection = engine(workers).scope(scopeId).collection(ledger)
@@ -403,6 +480,7 @@ class SyncEngineTest {
                             ),
                         ),
                     latestSeq = BatchSeq("50"),
+                    epoch = TEST_EPOCH,
                 )
             }
             // The adapter declines to decide, which is what an application that asks its user does.
@@ -498,7 +576,7 @@ class SyncEngineTest {
             var pulls = 0
             transport.onChanges = {
                 pulls++
-                ChangesPage(emptyList(), nextCursor = null, hasMore = false)
+                ChangesPage(emptyList(), nextCursor = null, hasMore = false, epoch = TEST_EPOCH)
             }
             val signals = MutableSharedFlow<SyncChannelSignal>(replay = 1)
             val channel =
@@ -522,7 +600,7 @@ class SyncEngineTest {
             var pulls = 0
             transport.onChanges = {
                 pulls++
-                ChangesPage(emptyList(), nextCursor = null, hasMore = false)
+                ChangesPage(emptyList(), nextCursor = null, hasMore = false, epoch = TEST_EPOCH)
             }
             val triggers = ManualTriggerSource()
             val collection =
@@ -538,6 +616,9 @@ class SyncEngineTest {
         }
 
     private companion object {
+        /** Incarnation the fake server answers from once the collection has been purged and re-created. */
+        const val NEW_EPOCH_VALUE = "0199fd1a-0000-7000-8000-00000000000f"
+
         /** Long enough for a local push, short enough that a stuck engine fails instead of hanging. */
         const val AWAIT_TIMEOUT_MILLIS = 10_000L
 

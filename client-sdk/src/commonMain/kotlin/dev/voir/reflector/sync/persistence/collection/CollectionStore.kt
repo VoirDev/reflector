@@ -2,6 +2,7 @@ package dev.voir.reflector.sync.persistence.collection
 
 import dev.voir.reflector.sync.core.SyncPhase
 import dev.voir.reflector.sync.core.adapter.SchemaFingerprint
+import dev.voir.reflector.sync.protocol.CollectionEpoch
 import dev.voir.reflector.sync.protocol.CollectionId
 import dev.voir.reflector.sync.protocol.Cursor
 import dev.voir.reflector.sync.protocol.PageToken
@@ -57,6 +58,7 @@ internal class CollectionStore(
                 scopeId = scope.value,
                 collectionId = collection.value,
                 cursor = null,
+                epoch = null,
                 phase = SyncPhase.NEW,
                 generation = 0,
                 bootstrapPage = null,
@@ -190,6 +192,38 @@ internal class CollectionStore(
     }
 
     /**
+     * Remembers which incarnation of the collection the server answered from.
+     *
+     * Called on every answer, and writes only when the value differs: the row is observed as a flow,
+     * and rewriting it on every page of every pull would wake the application's subscribers for a
+     * value that had not changed.
+     *
+     * @param scope Scope of the collection.
+     * @param collection Identifier of the collection.
+     * @param epoch Incarnation the server named.
+     */
+    public suspend fun setEpoch(
+        scope: ScopeId,
+        collection: CollectionId,
+        epoch: CollectionEpoch,
+    ) {
+        dao.setEpoch(scope.value, collection.value, epoch.value)
+    }
+
+    /**
+     * Forgets the previous incarnation and sends the collection back to a snapshot.
+     *
+     * @param scope Scope of the collection.
+     * @param collection Identifier of the collection.
+     */
+    public suspend fun forgetIncarnation(
+        scope: ScopeId,
+        collection: CollectionId,
+    ) {
+        dao.forgetIncarnation(scope.value, collection.value, SyncPhase.RESYNC_REQUIRED)
+    }
+
+    /**
      * Records a failed attempt.
      *
      * @param scope Scope of the collection.
@@ -231,6 +265,7 @@ internal class CollectionStore(
     private fun SyncCollectionEntity.toState(): CollectionState =
         CollectionState(
             cursor = cursor?.let(::Cursor),
+            epoch = epoch?.let(::CollectionEpoch),
             phase = phase,
             generation = generation,
             bootstrapPage = bootstrapPage?.let(::PageToken),

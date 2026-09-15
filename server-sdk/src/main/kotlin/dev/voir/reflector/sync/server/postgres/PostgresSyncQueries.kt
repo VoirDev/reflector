@@ -91,7 +91,7 @@ internal class PostgresSyncQueries(
                     documents
                         .lastOrNull()
                         ?.takeIf { hasMore }
-                        ?.let { SnapshotCursorToken(it.entityType, it.entityId, cursor = 0).encode() },
+                        ?.let { SnapshotCursorToken(row.id, it.entityType, it.entityId, cursor = 0).encode() },
             )
         }
 

@@ -328,6 +328,19 @@ internal class RecordStore(
     }
 
     /**
+     * Drops every local change of a collection, leaving its records clean.
+     *
+     * @param scope Scope of the collection.
+     * @param collection Collection whose local changes are abandoned.
+     */
+    public suspend fun discardLocalChanges(
+        scope: ScopeId,
+        collection: CollectionId,
+    ) {
+        dao.discardLocalChanges(scope.value, collection.value)
+    }
+
+    /**
      * Removes the metadata of one entity.
      *
      * @param scope Scope of the record.

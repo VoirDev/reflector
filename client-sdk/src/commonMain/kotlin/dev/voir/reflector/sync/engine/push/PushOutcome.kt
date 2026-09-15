@@ -22,6 +22,14 @@ internal sealed class PushOutcome {
     data object Blocked : PushOutcome()
 
     /**
+     * The collection these changes were made against no longer exists.
+     *
+     * The server refused the whole request rather than applying it, which is the point: the queue
+     * is about to be discarded, and a queue that had already been applied could not be.
+     */
+    data object ResetRequired : PushOutcome()
+
+    /**
      * The scope itself has to react before any push can succeed.
      *
      * @property failure Reason the scope is not usable, such as refused credentials or a revoked

@@ -1,5 +1,6 @@
 package dev.voir.reflector.sync.protocol.snapshot
 
+import dev.voir.reflector.sync.protocol.CollectionEpoch
 import dev.voir.reflector.sync.protocol.Cursor
 import dev.voir.reflector.sync.protocol.PageToken
 import kotlinx.serialization.Serializable
@@ -18,6 +19,9 @@ import kotlinx.serialization.Serializable
  * @property items Entities of this page.
  * @property nextPage Token of the next page, or `null` when this is the last one.
  * @property hasMore Whether another page follows.
+ * @property epoch Incarnation of the collection being transferred, stored by the client together
+ *   with [cursor]. A collection purged midway through a transfer answers the next page with a
+ *   refusal rather than with pages of a different log stitched onto the ones already applied.
  */
 @Serializable
 public data class SnapshotPage(
@@ -25,4 +29,5 @@ public data class SnapshotPage(
     public val items: List<SnapshotItem>,
     public val nextPage: PageToken?,
     public val hasMore: Boolean,
+    public val epoch: CollectionEpoch,
 )

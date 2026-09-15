@@ -16,11 +16,18 @@ import kotlin.uuid.Uuid
  * hand out a newer position each time, and a client that adopted the last one would silently skip
  * everything committed while the snapshot was being transferred.
  *
+ * And it carries the incarnation the transfer began under, for the case the epoch exists for: a
+ * collection purged halfway through a snapshot would otherwise continue from the key the old one
+ * had reached, and the client would be left holding one half of one log and one half of another,
+ * each internally consistent.
+ *
+ * @property collectionRowId Incarnation of the collection the transfer began under.
  * @property entityType Type of the last entity of the previous page.
  * @property entityId Identifier of the last entity of the previous page.
  * @property cursor Position of the log fixed before the first page.
  */
 internal data class SnapshotCursorToken(
+    val collectionRowId: Uuid,
     val entityType: EntityType,
     val entityId: EntityId,
     val cursor: Long,
@@ -31,15 +38,17 @@ internal data class SnapshotCursorToken(
      * @return Opaque token; clients hand it back unchanged.
      */
     fun encode(): PageToken {
-        val payload = "${entityType.value}$SEPARATOR${entityId.value}$SEPARATOR$cursor"
+        val payload =
+            listOf(collectionRowId.toString(), entityType.value, entityId.value.toString(), cursor.toString())
+                .joinToString(SEPARATOR.toString())
         return PageToken(Base64.UrlSafe.encode(payload.encodeToByteArray()))
     }
 
     companion object {
         private const val SEPARATOR = '\u001f'
 
-        /** Type, identifier and cursor. */
-        private const val PART_COUNT = 3
+        /** Incarnation, type, identifier and cursor. */
+        private const val PART_COUNT = 4
 
         /**
          * Decodes a token produced by [encode].
@@ -55,9 +64,12 @@ internal data class SnapshotCursorToken(
             val parts = decoded.split(SEPARATOR)
             require(parts.size == PART_COUNT) { "malformed page token" }
             return SnapshotCursorToken(
-                entityType = EntityType(parts[0]),
-                entityId = EntityId(Uuid.parse(parts[1])),
-                cursor = parts[2].toLongOrNull() ?: throw IllegalArgumentException("malformed page token"),
+                collectionRowId =
+                    runCatching { Uuid.parse(parts[0]) }
+                        .getOrElse { throw IllegalArgumentException("malformed page token") },
+                entityType = EntityType(parts[1]),
+                entityId = EntityId(Uuid.parse(parts[2])),
+                cursor = parts[3].toLongOrNull() ?: throw IllegalArgumentException("malformed page token"),
             )
         }
     }

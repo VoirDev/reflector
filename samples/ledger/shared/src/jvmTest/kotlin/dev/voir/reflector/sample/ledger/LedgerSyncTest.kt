@@ -7,6 +7,7 @@ import dev.voir.reflector.sync.core.SyncPhase
 import dev.voir.reflector.sync.core.transport.SyncTransport
 import dev.voir.reflector.sync.protocol.BatchSeq
 import dev.voir.reflector.sync.protocol.ClientId
+import dev.voir.reflector.sync.protocol.CollectionEpoch
 import dev.voir.reflector.sync.protocol.CollectionId
 import dev.voir.reflector.sync.protocol.Cursor
 import dev.voir.reflector.sync.protocol.EntityId
@@ -145,7 +146,7 @@ class LedgerSyncTest {
             // The server no longer has it, and a client that was offline for the deletion learns
             // about it only from the absence.
             server.snapshotItems = emptyList()
-            server.snapshotCursor = Cursor("200")
+            server.snapshotCursor = Cursor("${EPOCH.value}.200")
             collection.requestResync()
 
             // The test waits for the observable outcome rather than for a phase: the collection is
@@ -177,7 +178,7 @@ class LedgerSyncTest {
     private class ScriptedServer : SyncTransport {
         val pushes: MutableList<PushRequest> = mutableListOf()
         var snapshotItems: List<SnapshotItem> = emptyList()
-        var snapshotCursor: Cursor = Cursor("100")
+        var snapshotCursor: Cursor = Cursor("${EPOCH.value}.100")
 
         override suspend fun push(
             scope: ScopeId,
@@ -195,6 +196,7 @@ class LedgerSyncTest {
                         ),
                     ),
                 latestSeq = BatchSeq("1"),
+                epoch = EPOCH,
             )
         }
 
@@ -203,14 +205,14 @@ class LedgerSyncTest {
             collection: CollectionId,
             cursor: Cursor?,
             limit: Int,
-        ): ChangesPage = ChangesPage(emptyList(), nextCursor = null, hasMore = false)
+        ): ChangesPage = ChangesPage(emptyList(), nextCursor = null, hasMore = false, epoch = EPOCH)
 
         override suspend fun snapshot(
             scope: ScopeId,
             collection: CollectionId,
             page: PageToken?,
             limit: Int,
-        ): SnapshotPage = SnapshotPage(snapshotCursor, snapshotItems, nextPage = null, hasMore = false)
+        ): SnapshotPage = SnapshotPage(snapshotCursor, snapshotItems, null, hasMore = false, epoch = EPOCH)
 
         override suspend fun limits(): SyncLimits =
             SyncLimits(
@@ -222,6 +224,9 @@ class LedgerSyncTest {
     }
 
     private companion object {
+        /** Incarnation the scripted server answers from; it never purges, so it never changes. */
+        val EPOCH = CollectionEpoch("0199fd1a-0000-7000-8000-00000000000e")
+
         const val TIMEOUT_MILLIS = 10_000L
 
         /** How often the test looks at a table it cannot observe as a flow. */

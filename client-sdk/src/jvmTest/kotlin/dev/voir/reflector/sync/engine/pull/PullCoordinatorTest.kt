@@ -8,8 +8,10 @@ import dev.voir.reflector.sync.core.transport.SyncTransportFailure
 import dev.voir.reflector.sync.engine.FakeAdapter
 import dev.voir.reflector.sync.engine.FakeTransport
 import dev.voir.reflector.sync.engine.RecordingMetrics
+import dev.voir.reflector.sync.engine.TEST_EPOCH
 import dev.voir.reflector.sync.engine.TestClock
 import dev.voir.reflector.sync.engine.mutation.MutationCoordinator
+import dev.voir.reflector.sync.engine.testCursor
 import dev.voir.reflector.sync.openTestDatabase
 import dev.voir.reflector.sync.persistence.RoomSyncTransactionRunner
 import dev.voir.reflector.sync.persistence.SyncStores
@@ -102,7 +104,7 @@ class PullCoordinatorTest {
     private fun page(
         batch: ChangeBatch,
         hasMore: Boolean = false,
-    ): ChangesPage = ChangesPage(listOf(batch), batch.seq.asCursor(), hasMore)
+    ): ChangesPage = ChangesPage(listOf(batch), batch.cursor, hasMore, epoch = TEST_EPOCH)
 
     private fun upsert(
         index: Int,
@@ -114,13 +116,14 @@ class PullCoordinatorTest {
     fun `a batch is applied together with its cursor`() =
         runTest {
             goLive()
-            transport.onChanges = { page(ChangeBatch(BatchSeq("10"), them, listOf(upsert(1, "10", "Cash")))) }
+            transport.onChanges =
+                { page(ChangeBatch(BatchSeq("10"), testCursor("10"), them, listOf(upsert(1, "10", "Cash")))) }
 
             assertEquals(PullOutcome.UpToDate, coordinator.pull())
 
             assertEquals(body("Cash"), adapter.bodies[wallet to entity(1)])
             val state = assertNotNull(stores.collections.find(scope, collection))
-            assertEquals(Cursor("10"), state.cursor)
+            assertEquals(testCursor("10"), state.cursor)
             assertNull(stores.inbox.oldestPending(scope, collection), "an applied batch must leave the inbox")
             val record = assertNotNull(stores.records.find(scope, collection, wallet, entity(1)))
             assertEquals(EntityVersion("10"), record.serverVersion)
@@ -132,7 +135,8 @@ class PullCoordinatorTest {
             goLive()
             adapter.bodies[wallet to entity(1)] = body("Cash renamed")
             mutations.mutate(scope, collection) { markUpserted(wallet, entity(1)) }
-            transport.onChanges = { page(ChangeBatch(BatchSeq("10"), us, listOf(upsert(1, "10", "Cash")))) }
+            transport.onChanges =
+                { page(ChangeBatch(BatchSeq("10"), testCursor("10"), us, listOf(upsert(1, "10", "Cash")))) }
 
             coordinator.pull()
 
@@ -149,7 +153,8 @@ class PullCoordinatorTest {
             goLive()
             adapter.bodies[wallet to entity(1)] = body("Mine")
             mutations.mutate(scope, collection) { markUpserted(wallet, entity(1)) }
-            transport.onChanges = { page(ChangeBatch(BatchSeq("10"), them, listOf(upsert(1, "10", "Theirs")))) }
+            transport.onChanges =
+                { page(ChangeBatch(BatchSeq("10"), testCursor("10"), them, listOf(upsert(1, "10", "Theirs")))) }
 
             coordinator.pull()
 
@@ -160,7 +165,11 @@ class PullCoordinatorTest {
             assertEquals(body("Theirs"), conflict.server)
             assertEquals(EntityVersion("10"), conflict.serverVersion)
             val state = assertNotNull(stores.collections.find(scope, collection))
-            assertEquals(Cursor("10"), state.cursor, "the cursor moves on, which is why the conflict must be durable")
+            assertEquals(
+                testCursor("10"),
+                state.cursor,
+                "the cursor moves on, which is why the conflict must be durable",
+            )
         }
 
     @Test
@@ -172,7 +181,7 @@ class PullCoordinatorTest {
                     RemoteOperationSerializer,
                     """{"op":"evict","entity":"wallet","id":"00000000-0000-7000-8000-100000000001","version":"10"}""",
                 )
-            transport.onChanges = { page(ChangeBatch(BatchSeq("10"), them, listOf(raw))) }
+            transport.onChanges = { page(ChangeBatch(BatchSeq("10"), testCursor("10"), them, listOf(raw))) }
 
             assertEquals(PullOutcome.BootstrapRequired, coordinator.pull())
 
@@ -186,15 +195,17 @@ class PullCoordinatorTest {
     fun `a change already known by version is not applied again`() =
         runTest {
             goLive()
-            transport.onChanges = { page(ChangeBatch(BatchSeq("10"), them, listOf(upsert(1, "10", "Cash")))) }
+            transport.onChanges =
+                { page(ChangeBatch(BatchSeq("10"), testCursor("10"), them, listOf(upsert(1, "10", "Cash")))) }
             coordinator.pull()
             adapter.applied.clear()
-            transport.onChanges = { page(ChangeBatch(BatchSeq("11"), them, listOf(upsert(1, "10", "Cash")))) }
+            transport.onChanges =
+                { page(ChangeBatch(BatchSeq("11"), testCursor("11"), them, listOf(upsert(1, "10", "Cash")))) }
 
             coordinator.pull()
 
             assertTrue(adapter.applied.isEmpty(), "the same version cannot carry anything new")
-            assertEquals(Cursor("11"), assertNotNull(stores.collections.find(scope, collection)).cursor)
+            assertEquals(testCursor("11"), assertNotNull(stores.collections.find(scope, collection)).cursor)
         }
 
     @Test
@@ -215,8 +226,16 @@ class PullCoordinatorTest {
             goLive()
             transport.onChanges = { cursor ->
                 when (cursor) {
-                    null -> page(ChangeBatch(BatchSeq("10"), them, listOf(upsert(1, "10", "Cash"))), hasMore = true)
-                    else -> page(ChangeBatch(BatchSeq("11"), them, listOf(upsert(2, "11", "Card"))))
+                    null -> {
+                        page(
+                            ChangeBatch(BatchSeq("10"), testCursor("10"), them, listOf(upsert(1, "10", "Cash"))),
+                            hasMore = true,
+                        )
+                    }
+
+                    else -> {
+                        page(ChangeBatch(BatchSeq("11"), testCursor("11"), them, listOf(upsert(2, "11", "Card"))))
+                    }
                 }
             }
 
@@ -224,7 +243,7 @@ class PullCoordinatorTest {
 
             assertEquals(body("Cash"), adapter.bodies[wallet to entity(1)])
             assertEquals(body("Card"), adapter.bodies[wallet to entity(2)])
-            assertEquals(Cursor("11"), assertNotNull(stores.collections.find(scope, collection)).cursor)
+            assertEquals(testCursor("11"), assertNotNull(stores.collections.find(scope, collection)).cursor)
         }
 
     @Test
@@ -236,6 +255,7 @@ class PullCoordinatorTest {
                 page(
                     ChangeBatch(
                         BatchSeq("12"),
+                        testCursor("12"),
                         them,
                         listOf(RemoteOperation.Delete(wallet, entity(1), EntityVersion("12"))),
                     ),
@@ -254,7 +274,8 @@ class PullCoordinatorTest {
     fun `an interrupted apply is repeated after a restart and the cursor never passes it`() =
         runTest {
             goLive()
-            transport.onChanges = { page(ChangeBatch(BatchSeq("10"), them, listOf(upsert(1, "10", "Cash")))) }
+            transport.onChanges =
+                { page(ChangeBatch(BatchSeq("10"), testCursor("10"), them, listOf(upsert(1, "10", "Cash")))) }
             adapter.beforeApply = { error("killed between receiving the batch and applying it") }
 
             assertFailsWith<IllegalStateException> { coordinator.pull() }
@@ -273,7 +294,7 @@ class PullCoordinatorTest {
             assertEquals(PullOutcome.Blocked, newCoordinator().pull())
 
             assertEquals(body("Cash"), adapter.bodies[wallet to entity(1)])
-            assertEquals(Cursor("10"), assertNotNull(stores.collections.find(scope, collection)).cursor)
+            assertEquals(testCursor("10"), assertNotNull(stores.collections.find(scope, collection)).cursor)
             assertNull(stores.inbox.oldestPending(scope, collection))
             assertEquals(1, adapter.applied.size, "the batch is applied once, not once per attempt")
         }
@@ -285,11 +306,12 @@ class PullCoordinatorTest {
             transport.onChanges = {
                 ChangesPage(
                     listOf(
-                        ChangeBatch(BatchSeq("10"), them, listOf(upsert(1, "10", "Cash"))),
-                        ChangeBatch(BatchSeq("11"), them, listOf(upsert(2, "11", "Card"))),
+                        ChangeBatch(BatchSeq("10"), testCursor("10"), them, listOf(upsert(1, "10", "Cash"))),
+                        ChangeBatch(BatchSeq("11"), testCursor("11"), them, listOf(upsert(2, "11", "Card"))),
                     ),
-                    Cursor("11"),
+                    testCursor("11"),
                     hasMore = false,
+                    epoch = TEST_EPOCH,
                 )
             }
             adapter.beforeApply = { ops ->
@@ -299,19 +321,19 @@ class PullCoordinatorTest {
             assertFailsWith<IllegalStateException> { coordinator.pull() }
 
             assertEquals(
-                Cursor("10"),
+                testCursor("10"),
                 assertNotNull(stores.collections.find(scope, collection)).cursor,
                 "a batch and the cursor it produces commit together, so the first one survives alone",
             )
             assertNull(adapter.bodies[wallet to entity(2)])
 
             adapter.beforeApply = { }
-            transport.onChanges = { ChangesPage(emptyList(), Cursor("11"), hasMore = false) }
+            transport.onChanges = { ChangesPage(emptyList(), testCursor("11"), hasMore = false, epoch = TEST_EPOCH) }
 
             assertEquals(PullOutcome.UpToDate, newCoordinator().pull())
 
             assertEquals(body("Card"), adapter.bodies[wallet to entity(2)])
-            assertEquals(Cursor("11"), assertNotNull(stores.collections.find(scope, collection)).cursor)
+            assertEquals(testCursor("11"), assertNotNull(stores.collections.find(scope, collection)).cursor)
             assertEquals(
                 1,
                 adapter.applied.count { ops -> ops.any { it is RemoteOp.Upsert && it.id == entity(1) } },
@@ -326,9 +348,11 @@ class PullCoordinatorTest {
             adapter.bodies[wallet to entity(1)] = body("Mine")
             mutations.mutate(scope, collection) { markUpserted(wallet, entity(1)) }
 
-            transport.onChanges = { page(ChangeBatch(BatchSeq("10"), them, listOf(upsert(1, "10", "Theirs")))) }
+            transport.onChanges =
+                { page(ChangeBatch(BatchSeq("10"), testCursor("10"), them, listOf(upsert(1, "10", "Theirs")))) }
             coordinator.pull()
-            transport.onChanges = { page(ChangeBatch(BatchSeq("11"), them, listOf(upsert(1, "11", "Theirs again")))) }
+            transport.onChanges =
+                { page(ChangeBatch(BatchSeq("11"), testCursor("11"), them, listOf(upsert(1, "11", "Theirs again")))) }
             coordinator.pull()
 
             // One entity, one disagreement, however many times it arrives. A second row would take

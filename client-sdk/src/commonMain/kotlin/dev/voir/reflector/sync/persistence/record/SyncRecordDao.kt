@@ -373,6 +373,27 @@ public interface SyncRecordDao {
     )
 
     /**
+     * Drops every local change of a collection, leaving the records clean.
+     *
+     * Used when the server's collection turns out to be a different one from the one these records
+     * describe. The rows are not deleted here: they still stand for the application's own rows, and
+     * deleting them would orphan those. Marking them clean hands them to the bootstrap's sweep,
+     * which removes both together — or, for the ones the new snapshot does mention, overwrites them.
+     *
+     * @param scopeId Scope of the collection.
+     * @param collectionId Identifier of the collection.
+     */
+    @Query(
+        "UPDATE sync_record SET local_rev = acked_rev, pushing_rev = acked_rev, server_version = NULL, " +
+            "intent = NULL, group_id = NULL, conflict_id = NULL " +
+            "WHERE scope_id = :scopeId AND collection_id = :collectionId",
+    )
+    public suspend fun discardLocalChanges(
+        scopeId: String,
+        collectionId: String,
+    )
+
+    /**
      * Removes every record of a scope, used when the scope's data is wiped.
      *
      * @param scopeId Scope to wipe.

@@ -57,6 +57,7 @@ transaction, and after a crash the cursor would diverge from the data.
 sync_collection(
   scope_id TEXT, collection_id TEXT,   -- PK
   cursor TEXT NULL,                    -- opaque server token
+  epoch TEXT NULL,                     -- which incarnation of the collection that cursor is in
   phase TEXT,                          -- NEW | BOOTSTRAPPING | LIVE | RESYNC_REQUIRED
                                        -- NEEDS_ATTENTION is never stored here: it is derived
                                        -- from the open conflict count when state is published
@@ -65,6 +66,12 @@ sync_collection(
   last_pull_at INTEGER, last_push_at INTEGER,
   schema_fingerprint TEXT NULL,        -- the application's declared shape of its own tables
   last_error TEXT NULL, failure_count INTEGER
+);
+
+sync_inbox_batch(
+  scope_id TEXT, collection_id TEXT, seq TEXT,   -- PK
+  cursor TEXT NOT NULL,                -- the position to store once this batch has been applied
+  …
 );
 
 sync_record(
@@ -399,7 +406,7 @@ nothing.
 
 ## 8. Bootstrap and resync
 
-Triggers: `phase = NEW`, `410 cursorTooOld`, the WS message `resync`.
+Triggers: `phase = NEW`, `410 cursorTooOld`, `409 collectionReset`, the WS message `resync`.
 
 ```
 generation++
@@ -422,7 +429,50 @@ The snapshot is "dirty": the server fixes `cursor0` before it starts serving and
 hold repeatable read across all the pages. Repeats are possible, omissions are not — and
 under snapshot semantics a repeat is idempotent.
 
-The sweep does not touch dirty records: they survive a resync and go out with a push.
+The sweep does not touch dirty records: they survive a resync and go out with a push. The one
+exception is a reset, below, where there is nothing for them to survive into.
+
+### The collection was replaced: `409`
+
+A purge on the server does not age a cursor out, it invalidates it. The collection begins again
+under a new identity, and everything this device holds — the cursor, the versions, the queue, the
+open conflicts — describes a log that no longer exists.
+
+The client cannot work that out for itself, so the server names the incarnation and the client
+carries it:
+
+```
+sync_collection.epoch := the epoch of every answer (changes, snapshot, push)
+POST …/push   {"clientId":…, "epoch":"<the one stored>", "groups":[…]}
+  → 409  when that incarnation is gone; nothing of the request was applied
+GET  …/changes?cursor=…      → 409 when the cursor names an incarnation that is gone
+```
+
+**The push carries it, and that is the point.** The worker pushes before it pulls, so a client that
+only learned about the purge from a read would already have re-created, entity by entity, the data
+the purge removed — and the server could not tell those writes from ordinary new ones. The epoch
+travels with the push so that the refusal arrives *before* anything is written.
+
+On `409` the collection is emptied and rebuilt:
+
+```
+groups, conflicts, inbox for this collection := deleted
+every record := clean (local_rev := acked_rev, server_version := NULL)
+cursor := NULL, epoch := NULL, bootstrap_page := NULL, phase := RESYNC_REQUIRED
+then the ordinary bootstrap, whose sweep deletes every application row the new snapshot omits
+```
+
+**Unsent local changes are discarded, and this is the only place the library does that.** A
+conflict is a disagreement between two versions of an entity; after a purge there is no other
+version to disagree with, and keeping the edits would mean deciding, against an explicit erasure,
+that this device's copy wins. The server is the source of truth and the truth is that there is
+nothing. It is reported at `WARN` with the number of changes abandoned, because it is the one case
+where a user can lose work that nobody on the device asked to lose. A host that cannot afford that
+must stop the device from reaching the scope at all, which is what `403` is for.
+
+The records are marked clean rather than deleted: they are what ties the library's bookkeeping to
+the application's rows, and deleting them would orphan those rows. Marking them clean hands them to
+the bootstrap's existing sweep, which removes both together.
 
 **The cursor is fixed from the first page, not at the end.** `cursor0` is written into
 `sync_collection.cursor` as soon as the first page arrives, and a bootstrap resumed after a
@@ -780,7 +830,8 @@ merging groups. An unknown code becomes `SyncRejection.Unknown` and is treated a
 5. A push is idempotent by `groupId`: re-sending returns the stored result instead of applying
    it twice.
 6. A group is applied atomically; groups in one request are independent.
-7. `410` on a stale cursor, `403` when access to a scope is revoked, `429` with `Retry-After`.
+7. `410` on a stale cursor, `409` when the collection was purged and began again, `403` when
+   access to a scope is revoked, `429` with `Retry-After`.
 8. The changelog carries `originClientId` — without it echo suppression is impossible.
 9. Tombstones live at least as long as the declared retention window; that window is published
    so that a client can go to bootstrap early after a long offline stretch.
@@ -789,3 +840,5 @@ merging groups. An unknown code becomes `SyncRejection.Unknown` and is treated a
 12. The set of operation codes in the log is fixed (`upsert`, `delete`); extending it is a
     breaking change, because the client rejects an unknown code with a resync.
 13. `401` for an invalid token and `403` for revoked access to a scope are distinguishable.
+14. Every answer names the collection's incarnation, and a cursor belongs to exactly one of them:
+    a client must never be served a page of one log from a position in another.

@@ -14,6 +14,7 @@ import dev.voir.reflector.sync.core.transport.SyncTransportFailure
 import dev.voir.reflector.sync.engine.FakeAdapter
 import dev.voir.reflector.sync.engine.FakeTransport
 import dev.voir.reflector.sync.engine.RecordingMetrics
+import dev.voir.reflector.sync.engine.TEST_EPOCH
 import dev.voir.reflector.sync.engine.TestClock
 import dev.voir.reflector.sync.engine.mutation.MutationCoordinator
 import dev.voir.reflector.sync.engine.retry.BackoffPolicy
@@ -128,6 +129,7 @@ class PushCoordinatorTest {
                     ),
                 ),
             latestSeq = BatchSeq(version),
+            epoch = TEST_EPOCH,
         )
     }
 
@@ -193,6 +195,7 @@ class PushCoordinatorTest {
                             ),
                         ),
                     latestSeq = BatchSeq("50"),
+                    epoch = TEST_EPOCH,
                 )
             }
 
@@ -227,6 +230,7 @@ class PushCoordinatorTest {
                             ),
                         ),
                     latestSeq = BatchSeq("1"),
+                    epoch = TEST_EPOCH,
                 )
             }
 
@@ -263,6 +267,7 @@ class PushCoordinatorTest {
                             ),
                         ),
                     latestSeq = BatchSeq("1"),
+                    epoch = TEST_EPOCH,
                 )
             }
 
@@ -290,6 +295,7 @@ class PushCoordinatorTest {
                             ),
                         ),
                     latestSeq = BatchSeq("1"),
+                    epoch = TEST_EPOCH,
                 )
             }
             val coordinator = coordinator(maxDependencyMerges = 1)
@@ -325,6 +331,7 @@ class PushCoordinatorTest {
                             ),
                         ),
                     latestSeq = BatchSeq("1"),
+                    epoch = TEST_EPOCH,
                 )
             }
 
@@ -360,6 +367,7 @@ class PushCoordinatorTest {
                             ),
                         ),
                     latestSeq = BatchSeq("1"),
+                    epoch = TEST_EPOCH,
                 )
             }
 
@@ -396,6 +404,7 @@ class PushCoordinatorTest {
                             ),
                         ),
                     latestSeq = BatchSeq("1"),
+                    epoch = TEST_EPOCH,
                 )
             }
 
@@ -437,6 +446,7 @@ class PushCoordinatorTest {
                             ),
                         ),
                     latestSeq = BatchSeq("7"),
+                    epoch = TEST_EPOCH,
                 )
             }
 
@@ -502,6 +512,7 @@ class PushCoordinatorTest {
                             ),
                         ),
                     latestSeq = BatchSeq("50"),
+                    epoch = TEST_EPOCH,
                 )
             }
             assertEquals(PushOutcome.Blocked, coordinator().pushOnce())
@@ -533,6 +544,7 @@ class PushCoordinatorTest {
                             ),
                         ),
                     latestSeq = BatchSeq("1"),
+                    epoch = TEST_EPOCH,
                 )
             }
             assertEquals(PushOutcome.Blocked, coordinator().pushOnce())
@@ -563,6 +575,7 @@ class PushCoordinatorTest {
                             ),
                         ),
                     latestSeq = BatchSeq("1"),
+                    epoch = TEST_EPOCH,
                 )
             }
             coordinator().pushOnce()
@@ -779,6 +792,7 @@ class PushCoordinatorTest {
                             ),
                         ),
                     latestSeq = BatchSeq("51"),
+                    epoch = TEST_EPOCH,
                 )
             }
 

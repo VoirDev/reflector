@@ -3,6 +3,7 @@ package dev.voir.reflector.sync.persistence.inbox
 import dev.voir.reflector.sync.protocol.BatchSeq
 import dev.voir.reflector.sync.protocol.ClientId
 import dev.voir.reflector.sync.protocol.CollectionId
+import dev.voir.reflector.sync.protocol.Cursor
 import dev.voir.reflector.sync.protocol.EntityId
 import dev.voir.reflector.sync.protocol.EntityType
 import dev.voir.reflector.sync.protocol.EntityVersion
@@ -44,6 +45,7 @@ internal class InboxStore(
                     scopeId = scope.value,
                     collectionId = collection.value,
                     seq = batch.seq.value,
+                    cursor = batch.cursor.value,
                     receivedOrd = ord++,
                     originClientId = batch.originClientId?.value,
                     state = InboxBatchState.PENDING,
@@ -84,6 +86,7 @@ internal class InboxStore(
         val ops = dao.opsOf(scope.value, collection.value, batch.seq)
         return StoredBatch(
             seq = BatchSeq(batch.seq),
+            cursor = Cursor(batch.cursor),
             originClientId = batch.originClientId?.let(::ClientId),
             ops =
                 ops.map { op ->

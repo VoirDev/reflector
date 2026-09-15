@@ -1,14 +1,21 @@
 package dev.voir.reflector.sync.server.postgres
 
 import dev.voir.reflector.sync.protocol.BatchSeq
+import dev.voir.reflector.sync.protocol.CollectionEpoch
 import dev.voir.reflector.sync.protocol.Cursor
 import dev.voir.reflector.sync.protocol.EntityVersion
+import kotlin.uuid.Uuid
 
 /**
  * Conversions between the module's internal ordering and the opaque tokens the protocol uses.
  *
  * Clients treat cursors and versions as strings they only compare for equality, so the encoding is
  * free to be this simple — and keeping it in one place is what makes it safe to change later.
+ *
+ * A cursor carries the collection's incarnation as well as the position, because a position alone
+ * stopped being meaningful the moment a collection could be purged: the same number means something
+ * different in a log that started again. The two travel together so that the pair cannot be split
+ * by a caller who only remembered to carry one of them.
  */
 internal object SyncSequences {
     /**
@@ -20,12 +27,28 @@ internal object SyncSequences {
     fun batchSeq(seq: Long): BatchSeq = BatchSeq(seq.toString())
 
     /**
-     * Encodes a sequence as a cursor.
+     * Names one incarnation of a collection.
      *
+     * The collection row's identifier is used as it stands. It is random per row and a purge
+     * deletes the row, so a re-created collection is a different incarnation without the schema
+     * having to carry a counter that somebody could forget to bump.
+     *
+     * @param collectionRowId Identifier of the collection row.
+     * @return Epoch for the wire.
+     */
+    fun epoch(collectionRowId: Uuid): CollectionEpoch = CollectionEpoch(collectionRowId.toString())
+
+    /**
+     * Encodes a position in one incarnation of a collection's log.
+     *
+     * @param collectionRowId Identifier of the collection row the position belongs to.
      * @param seq Sequence the reader has reached.
      * @return Cursor for the wire.
      */
-    fun cursor(seq: Long): Cursor = Cursor(seq.toString())
+    fun cursor(
+        collectionRowId: Uuid,
+        seq: Long,
+    ): Cursor = Cursor("$collectionRowId$SEPARATOR$seq")
 
     /**
      * Encodes a sequence as an entity version.
@@ -39,14 +62,21 @@ internal object SyncSequences {
     fun version(seq: Long): EntityVersion = EntityVersion(seq.toString())
 
     /**
-     * Reads the sequence out of a cursor.
+     * Reads a cursor back.
      *
      * @param cursor Cursor as the client sent it back.
-     * @return Sequence the client has reached.
+     * @return Incarnation it belongs to and the position inside it.
      * @throws IllegalArgumentException When the cursor was not produced by this module.
      */
-    fun sequenceOf(cursor: Cursor): Long =
-        cursor.value.toLongOrNull() ?: throw IllegalArgumentException("malformed cursor '${cursor.value}'")
+    fun positionOf(cursor: Cursor): CursorPosition {
+        val parts = cursor.value.split(SEPARATOR)
+        require(parts.size == PART_COUNT) { "malformed cursor '${cursor.value}'" }
+        val epoch =
+            runCatching { Uuid.parse(parts[0]) }
+                .getOrElse { throw IllegalArgumentException("malformed cursor '${cursor.value}'") }
+        val seq = parts[1].toLongOrNull() ?: throw IllegalArgumentException("malformed cursor '${cursor.value}'")
+        return CursorPosition(epoch, seq)
+    }
 
     /**
      * Reads the sequence out of a version.
@@ -55,4 +85,21 @@ internal object SyncSequences {
      * @return Sequence the version stands for, or `null` when it is not one this module produced.
      */
     fun sequenceOf(version: EntityVersion): Long? = version.value.toLongOrNull()
+
+    /** Separates the incarnation from the position; absent from both a UUID and a number. */
+    private const val SEPARATOR = '.'
+
+    /** Incarnation and position. */
+    private const val PART_COUNT = 2
 }
+
+/**
+ * A cursor taken apart.
+ *
+ * @property collectionRowId Incarnation of the collection the cursor was issued for.
+ * @property seq Position inside that incarnation's log.
+ */
+internal data class CursorPosition(
+    val collectionRowId: Uuid,
+    val seq: Long,
+)

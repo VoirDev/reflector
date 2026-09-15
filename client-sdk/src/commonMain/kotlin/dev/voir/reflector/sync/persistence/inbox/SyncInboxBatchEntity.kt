@@ -11,7 +11,11 @@ import kotlin.uuid.Uuid
  *
  * @property scopeId Scope the batch belongs to.
  * @property collectionId Collection the batch belongs to.
- * @property seq Opaque sequence of the batch; it becomes the collection's cursor once applied.
+ * @property seq Opaque sequence of the batch, for ordering and for deleting it once applied.
+ * @property cursor Position to store once the batch has been applied, served by the server with the
+ *   batch. Kept here rather than derived from [seq] when the batch is applied, because it names the
+ *   incarnation of the collection as well as the position, and a batch can sit in this table across
+ *   a restart.
  * @property receivedOrd Position of the batch in the order the server returned it. Batches must be
  *   applied in exactly that order, and the sequence cannot provide it: it is an opaque string, so
  *   sorting by it would put "10" before "9" and let the cursor jump over a batch.
@@ -26,6 +30,7 @@ public data class SyncInboxBatchEntity(
     @ColumnInfo(name = "scope_id") public val scopeId: String,
     @ColumnInfo(name = "collection_id") public val collectionId: String,
     @ColumnInfo(name = "seq") public val seq: String,
+    @ColumnInfo(name = "cursor") public val cursor: String,
     @ColumnInfo(name = "received_ord") public val receivedOrd: Long,
     @ColumnInfo(name = "origin_client_id") public val originClientId: Uuid?,
     @ColumnInfo(name = "state") public val state: InboxBatchState,

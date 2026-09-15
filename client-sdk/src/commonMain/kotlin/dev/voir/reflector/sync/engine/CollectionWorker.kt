@@ -176,11 +176,14 @@ internal class CollectionWorker(
         if (needsBootstrap() && !bootstrap(bootstrap)) {
             return
         }
-        if (!drainQueue(push)) {
-            return
+        when (drainQueue(push)) {
+            QueueOutcome.STOPPED -> return
+            QueueOutcome.RESET -> return resetToServer(bootstrap)
+            QueueOutcome.DRAINED -> Unit
         }
         when (val outcome = pull.pull()) {
             is PullOutcome.Interrupted -> return interrupt(outcome.failure)
+            PullOutcome.ResetRequired -> return resetToServer(bootstrap)
             PullOutcome.BootstrapRequired -> if (!bootstrap(bootstrap)) return
             PullOutcome.Blocked -> Unit
             PullOutcome.UpToDate -> lastFailure.value = null
@@ -322,6 +325,12 @@ internal class CollectionWorker(
                 false
             }
 
+            // The collection was replaced again, during the rebuild. Nothing more is attempted this
+            // cycle: the next one starts from a collection that has already forgotten the old one.
+            BootstrapOutcome.ResetRequired -> {
+                false
+            }
+
             is BootstrapOutcome.Interrupted -> {
                 interrupt(outcome.failure)
                 false
@@ -331,9 +340,9 @@ internal class CollectionWorker(
     /**
      * Sends groups until the queue is empty or stops moving.
      *
-     * @return `false` when the scope itself needs attention and the cycle has to end.
+     * @return What the rest of the cycle should do.
      */
-    private suspend fun drainQueue(push: PushCoordinator): Boolean {
+    private suspend fun drainQueue(push: PushCoordinator): QueueOutcome {
         while (true) {
             when (val outcome = push.pushOnce()) {
                 PushOutcome.Applied -> {
@@ -341,19 +350,84 @@ internal class CollectionWorker(
                 }
 
                 PushOutcome.Idle -> {
-                    return true
+                    return QueueOutcome.DRAINED
                 }
 
                 PushOutcome.Blocked -> {
-                    return true
+                    return QueueOutcome.DRAINED
+                }
+
+                PushOutcome.ResetRequired -> {
+                    return QueueOutcome.RESET
                 }
 
                 is PushOutcome.Interrupted -> {
                     interrupt(outcome.failure)
-                    return false
+                    return QueueOutcome.STOPPED
                 }
             }
         }
+    }
+
+    /**
+     * What draining the queue means for the rest of the cycle.
+     */
+    private enum class QueueOutcome {
+        /** The queue is empty or waiting; carry on and read the log. */
+        DRAINED,
+
+        /** The scope needs attention; end the cycle and keep everything as it is. */
+        STOPPED,
+
+        /** The collection on the server is a different one; discard the local copy and rebuild. */
+        RESET,
+    }
+
+    /**
+     * Throws away the local copy of a collection the server no longer has, and rebuilds it.
+     *
+     * This is the library's answer to a purge, and it is deliberately total. The cursor, the
+     * versions, the queue, the open conflicts and the pending edits all describe one incarnation of
+     * one collection; when the server replaces it, none of them mean anything, and the ones that
+     * would survive a gentler treatment are precisely the ones that would push the erased data back
+     * up. The server is the source of truth, and the truth here is that there is nothing.
+     *
+     * Local changes are abandoned rather than offered as conflicts: a conflict is a disagreement
+     * between two versions of something, and after a purge there is no other version to disagree
+     * with. A host that cannot afford to lose them has to stop the device from reaching a purged
+     * scope, which is what revoking its access does.
+     *
+     * The records are marked clean rather than deleted, and the application's own rows are left for
+     * the bootstrap that follows: its sweep removes everything the new snapshot does not mention,
+     * which is the same work, already written and already tested.
+     *
+     * @param coordinator Bootstrap to rebuild the collection with once it has been emptied.
+     */
+    private suspend fun resetToServer(coordinator: BootstrapCoordinator) {
+        val abandoned =
+            transactions.transaction {
+                val pending = stores.records.pendingCount(scope, collection)
+                stores.groups.deleteCollection(scope, collection)
+                stores.conflicts.deleteCollection(scope, collection)
+                stores.inbox.clear(scope, collection)
+                stores.records.discardLocalChanges(scope, collection)
+                stores.collections.forgetIncarnation(scope, collection)
+                pending
+            }
+        declined.clear()
+        // Said outside the transaction, like every other report, and said at all because this is the
+        // only place the library destroys unsent work without being asked to.
+        log.warn(
+            SyncLogEvent.COLLECTION_RESET,
+            context = { mapOf("abandoned" to abandoned.toString()) },
+        ) {
+            "the server's collection is not the one this device was following; the local copy and " +
+                "$abandoned unsent change(s) were discarded"
+        }
+        log.info(SyncLogEvent.RESYNC_REQUIRED, context = { mapOf("reason" to "collection-reset") }) {
+            "the collection will be rebuilt from a snapshot because the server replaced it"
+        }
+        bootstrap(coordinator)
     }
 
     /**
@@ -452,6 +526,13 @@ internal class CollectionWorker(
                 is SyncTransportFailure.CursorTooOld -> {
                     SyncFailure.Server(GONE, failure.describe())
                 }
+
+                // Reported the same way and for the same reason: the library answers it by itself,
+                // and by the time the application could read this the collection is already being
+                // rebuilt. What was lost with it is in the log, where a person can find it.
+                is SyncTransportFailure.CollectionReset -> {
+                    SyncFailure.Server(CONFLICT, failure.describe())
+                }
             }
     }
 
@@ -489,5 +570,8 @@ internal class CollectionWorker(
 
         /** What the server answers for a cursor it no longer keeps history for. */
         const val GONE = 410
+
+        /** Status a host answers when the collection a client refers to has been purged. */
+        const val CONFLICT = 409
     }
 }

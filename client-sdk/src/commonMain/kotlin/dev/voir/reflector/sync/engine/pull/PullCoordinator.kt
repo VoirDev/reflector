@@ -102,6 +102,7 @@ internal class PullCoordinator(
             ) { "a page of the change log arrived and goes to the inbox before anything is applied" }
 
             transactions.transaction {
+                stores.collections.setEpoch(scope, collection, page.epoch)
                 stores.inbox.store(scope, collection, page.batches.map { it.toStored() })
             }
 
@@ -216,7 +217,7 @@ internal class PullCoordinator(
         stores.collections.advanceCursor(
             scope = scope,
             collection = collection,
-            cursor = batch.seq.asCursor(),
+            cursor = batch.cursor,
             appliedAt = clock.now().toEpochMilliseconds(),
         )
         stores.inbox.deleteApplied(scope, collection, batch.seq)
@@ -285,6 +286,10 @@ internal class PullCoordinator(
                 PullOutcome.BootstrapRequired
             }
 
+            is SyncTransportFailure.CollectionReset -> {
+                PullOutcome.ResetRequired
+            }
+
             is SyncTransportFailure.Unauthorized, is SyncTransportFailure.Revoked -> {
                 PullOutcome.Interrupted(failure)
             }
@@ -316,6 +321,7 @@ internal class PullCoordinator(
     private fun ChangeBatch.toStored(): StoredBatch =
         StoredBatch(
             seq = seq,
+            cursor = cursor,
             originClientId = originClientId,
             ops =
                 ops.map { operation ->

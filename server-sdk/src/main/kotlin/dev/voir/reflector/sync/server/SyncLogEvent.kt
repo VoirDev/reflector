@@ -35,6 +35,16 @@ public enum class SyncLogEvent(
     /** A host metrics sink threw, so that measurement was lost and nothing else was. */
     METRICS_SINK_FAILED(SyncLogSource.MODULE),
 
+    /**
+     * A client arrived talking about an incarnation of a collection that no longer exists.
+     *
+     * It survived a purge. Reported from whichever path it reached — a push, a page of the log, a
+     * snapshot — which is why it belongs to the module rather than to one of them: what it says is
+     * not "this read failed" but "this installation is still carrying data the purge removed", and
+     * a count of them is how a host knows the erasure has finished reaching the devices.
+     */
+    COLLECTION_RESET_REFUSED(SyncLogSource.MODULE),
+
     /** A group was written and a sequence consumed. */
     GROUP_APPLIED(SyncLogSource.PUSH),
 
@@ -81,4 +91,14 @@ public enum class SyncLogEvent(
 
     /** Retention trimming finished for one collection. */
     HISTORY_TRIMMED(SyncLogSource.MAINTENANCE),
+
+    /**
+     * A collection was purged: every row of it was physically deleted.
+     *
+     * Reported at `INFO`, and the line somebody eventually comes looking for: it is the only
+     * removal in the module that no window and no schedule can explain, and the only one a host may
+     * have to account for afterwards — "when did this scope's data go, and how much of it was
+     * there".
+     */
+    COLLECTION_PURGED(SyncLogSource.MAINTENANCE),
 }

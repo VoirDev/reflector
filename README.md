@@ -141,6 +141,22 @@ record with unsent local changes survives the sweep — the user's work is never
 
 An interrupted bootstrap resumes from its page token and keeps the cursor the first page fixed.
 
+### When the server erases a collection
+
+The host can purge a scope or a collection outright — every row of it dropped, not tombstoned. The
+devices that were synchronising it still hold their copy, and the worker pushes before it pulls, so
+without help the first of them to reconnect would put that copy straight back.
+
+So every answer names the collection's **incarnation**, a cursor names one as well as a position,
+and a push names the one it was made against. A push naming an incarnation that no longer exists is
+refused whole, before anything is written (`409`), and the client answers that by discarding the
+collection — rows, cursor, queue, conflicts, unsent edits — and rebuilding from the new snapshot.
+
+This is the one place the library throws away work nobody asked it to throw away, and it is
+deliberate: after an erasure there is no other version for a local edit to be an edit *of*, and
+keeping it would mean deciding that one device outvotes the erasure. It is distinct from `410`,
+which also rebuilds but keeps what was never sent.
+
 `requestResync()` is the same machinery, exposed on purpose: the library cannot notice that the
 application's tables have drifted from what it synchronised — a migration, a repair after a bug, an
 import from the side. When that happens, a bootstrap is cheaper than trusting a cursor whose data
@@ -216,8 +232,8 @@ either.
 ```
 GET  /v1/sync/config                              → limits and retention window
 POST /v1/sync/{scope}/{collection}/push           → {applied | conflict | rejected} per group
-GET  /v1/sync/{scope}/{collection}/changes?cursor= → batches, nextCursor, hasMore
-GET  /v1/sync/{scope}/{collection}/snapshot?page=  → cursor, items, nextPage, hasMore
+GET  /v1/sync/{scope}/{collection}/changes?cursor= → batches, nextCursor, hasMore, epoch
+GET  /v1/sync/{scope}/{collection}/snapshot?page=  → cursor, items, nextPage, hasMore, epoch
 WS   /v1/sync/{scope}/events                       → invalidate | resync | revoked
 ```
 

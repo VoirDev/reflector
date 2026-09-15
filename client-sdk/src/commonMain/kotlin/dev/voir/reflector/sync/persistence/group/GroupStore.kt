@@ -170,6 +170,19 @@ internal class GroupStore(
     }
 
     /**
+     * Removes every group of one collection.
+     *
+     * @param scope Scope of the collection.
+     * @param collection Collection to clear.
+     */
+    public suspend fun deleteCollection(
+        scope: ScopeId,
+        collection: CollectionId,
+    ) {
+        dao.deleteCollection(scope.value, collection.value)
+    }
+
+    /**
      * Removes every group of a scope.
      *
      * @param scope Scope to wipe.

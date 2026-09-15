@@ -1,6 +1,7 @@
 package dev.voir.reflector.sync.protocol.push
 
 import dev.voir.reflector.sync.protocol.ClientId
+import dev.voir.reflector.sync.protocol.CollectionEpoch
 import dev.voir.reflector.sync.protocol.EntityId
 import dev.voir.reflector.sync.protocol.EntityType
 import dev.voir.reflector.sync.protocol.EntityVersion
@@ -18,10 +19,11 @@ class PushWireFormatTest {
     private val json = SyncProtocolJson.format
 
     @Test
-    fun `push request is encoded in the shape the server expects`() {
+    fun `push request names the incarnation it was made against`() {
         val request =
             PushRequest(
                 clientId = ClientId(Uuid.parse("0199fd1a-0000-7000-8000-0000000000c1")),
+                epoch = CollectionEpoch("0199fd1a-0000-7000-8000-0000000000a1"),
                 groups =
                     listOf(
                         PushGroup(
@@ -49,6 +51,7 @@ class PushWireFormatTest {
                 """
                 {
                   "clientId": "0199fd1a-0000-7000-8000-0000000000c1",
+                  "epoch": "0199fd1a-0000-7000-8000-0000000000a1",
                   "groups": [
                     {
                       "groupId": "0199fd1a-0000-7000-8000-0000000000e1",
@@ -116,7 +119,8 @@ class PushWireFormatTest {
                 {"status":"rejected","groupId":"0199fd1a-0000-7000-8000-0000000000e3",
                  "error":{"code":"DEPENDENCY","message":"wallet is unknown to the server"}}
               ],
-              "latestSeq": "1187"
+              "latestSeq": "1187",
+              "epoch": "0199fd1a-0000-7000-8000-0000000000a1"
             }
             """.trimIndent()
 
@@ -128,5 +132,6 @@ class PushWireFormatTest {
         assertEquals(EntityVersion("42"), applied.versions.single().version)
         assertNull(conflict.conflicts.single().data)
         assertEquals(RejectCode.DEPENDENCY, rejected.error.code)
+        assertEquals(CollectionEpoch("0199fd1a-0000-7000-8000-0000000000a1"), response.epoch)
     }
 }

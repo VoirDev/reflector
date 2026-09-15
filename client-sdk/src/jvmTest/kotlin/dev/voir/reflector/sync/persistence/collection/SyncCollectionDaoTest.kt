@@ -33,6 +33,7 @@ class SyncCollectionDaoTest {
                 collectionId = ledger,
                 cursor = cursor,
                 phase = phase,
+                epoch = null,
                 generation = generation,
                 bootstrapPage = bootstrapPage,
                 lastPullAt = null,
@@ -120,7 +121,20 @@ class SyncCollectionDaoTest {
         runTest {
             seed()
             dao.upsert(
-                SyncCollectionEntity("user-2", ledger, null, SyncPhase.LIVE, 1, null, null, null, null, null, 0),
+                SyncCollectionEntity(
+                    "user-2",
+                    ledger,
+                    null,
+                    null,
+                    SyncPhase.LIVE,
+                    1,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    0,
+                ),
             )
 
             dao.deleteScope(scope)

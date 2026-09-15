@@ -2,6 +2,7 @@ package dev.voir.reflector.sync.persistence.collection
 
 import dev.voir.reflector.sync.core.SyncPhase
 import dev.voir.reflector.sync.core.adapter.SchemaFingerprint
+import dev.voir.reflector.sync.protocol.CollectionEpoch
 import dev.voir.reflector.sync.protocol.Cursor
 import dev.voir.reflector.sync.protocol.PageToken
 import kotlin.time.Instant
@@ -13,6 +14,8 @@ import kotlin.time.Instant
  * protocol's own types, so that a cursor cannot be passed where a page token belongs.
  *
  * @property cursor Position in the change log, or `null` when nothing has been read yet.
+ * @property epoch Incarnation of the collection the cursor belongs to, or `null` before the first
+ *   answer from the server.
  * @property phase Lifecycle phase of the collection.
  * @property generation Bootstrap counter used to sweep what a new snapshot did not confirm.
  * @property bootstrapPage Continuation token of an unfinished snapshot, or `null` when none is in
@@ -28,6 +31,7 @@ import kotlin.time.Instant
  */
 internal data class CollectionState(
     public val cursor: Cursor?,
+    public val epoch: CollectionEpoch?,
     public val phase: SyncPhase,
     public val generation: Long,
     public val bootstrapPage: PageToken?,

@@ -109,6 +109,9 @@ internal class BootstrapCoordinator(
                 // Everything committed since lives only in the log, and asking for a fresh position
                 // now would skip exactly that.
                 stores.collections.setCursor(scope, collection, fixedCursor)
+                // Stored with the cursor, because it is half of the same fact: a position is only a
+                // position in the log it was taken from.
+                stores.collections.setEpoch(scope, collection, snapshot.epoch)
                 stores.collections.updateBootstrapPage(scope, collection, snapshot.nextPage)
             }
             cursor = fixedCursor
@@ -265,6 +268,13 @@ internal class BootstrapCoordinator(
 
     private suspend fun handleFailure(failure: SyncTransportFailure): BootstrapOutcome =
         when (failure) {
+            is SyncTransportFailure.CollectionReset -> {
+                // The collection was purged between two pages. What has been applied so far is a
+                // prefix of a log that no longer exists, and the resume token points into it, so
+                // this transfer cannot be continued — it has to be thrown away and begun again.
+                BootstrapOutcome.ResetRequired
+            }
+
             is SyncTransportFailure.Unauthorized, is SyncTransportFailure.Revoked -> {
                 BootstrapOutcome.Interrupted(failure)
             }

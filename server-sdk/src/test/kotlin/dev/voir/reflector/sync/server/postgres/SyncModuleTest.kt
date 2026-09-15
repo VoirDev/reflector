@@ -68,7 +68,11 @@ class SyncModuleTest {
         assertEquals(client, batch.originClientId, "the client has to recognise its own change")
         val operation = assertIs<RemoteOperation.Upsert>(batch.ops.single())
         assertEquals(body("Cash"), operation.data)
-        assertEquals(batch.seq.asCursor(), assertNotNull(page.nextCursor))
+        assertEquals(batch.cursor, assertNotNull(page.nextCursor), "the page ends where its last batch does")
+        assertEquals(
+            page.epoch,
+            module.service.head(scope, ledger).let { service.changes(scope, ledger, it, 10).epoch },
+        )
     }
 
     @Test

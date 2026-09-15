@@ -18,6 +18,14 @@ internal sealed class BootstrapOutcome {
     data object Blocked : BootstrapOutcome()
 
     /**
+     * The collection was replaced on the server while it was being transferred.
+     *
+     * The pages already applied belong to a log that no longer exists, so the transfer cannot be
+     * resumed and what it produced cannot be kept.
+     */
+    data object ResetRequired : BootstrapOutcome()
+
+    /**
      * The scope itself has to react before anything can be read.
      *
      * @property failure Reason the scope is not usable.

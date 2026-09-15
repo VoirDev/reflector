@@ -30,7 +30,7 @@ class SyncInboxDaoTest {
         ord: Long,
         collection: String = ledger,
         state: InboxBatchState = InboxBatchState.PENDING,
-    ) = SyncInboxBatchEntity(scope, collection, seq, ord, null, state)
+    ) = SyncInboxBatchEntity(scope, collection, seq, "epoch.$seq", ord, null, state)
 
     private fun op(
         seq: String,

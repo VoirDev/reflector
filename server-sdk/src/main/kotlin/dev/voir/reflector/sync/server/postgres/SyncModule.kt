@@ -17,7 +17,8 @@ import kotlin.time.Clock
  *
  * @property service Protocol operations the host publishes as endpoints.
  * @property queries Read access to stored documents, for the host's own screens.
- * @property maintenance Retention trimming; the host decides how often it runs.
+ * @property maintenance Retention trimming and erasure of a scope or a collection; the host
+ *   decides when either runs.
  */
 public class SyncModule internal constructor(
     public val service: SyncService,

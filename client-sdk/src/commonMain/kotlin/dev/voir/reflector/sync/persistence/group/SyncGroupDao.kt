@@ -192,6 +192,18 @@ public interface SyncGroupDao {
     public suspend fun delete(groupId: Uuid)
 
     /**
+     * Removes every queued group of one collection.
+     *
+     * @param scopeId Scope of the collection.
+     * @param collectionId Identifier of the collection.
+     */
+    @Query("DELETE FROM sync_group WHERE scope_id = :scopeId AND collection_id = :collectionId")
+    public suspend fun deleteCollection(
+        scopeId: String,
+        collectionId: String,
+    )
+
+    /**
      * Removes every group of a scope, used when the scope's data is wiped.
      *
      * @param scopeId Scope to wipe.

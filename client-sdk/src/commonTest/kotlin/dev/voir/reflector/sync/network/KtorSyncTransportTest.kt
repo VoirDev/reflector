@@ -56,7 +56,7 @@ class KtorSyncTransportTest {
             tokens = tokenProvider,
         )
 
-    private fun emptyChanges() = """{"batches":[],"nextCursor":null,"hasMore":false}"""
+    private fun emptyChanges() = """{"batches":[],"nextCursor":null,"hasMore":false,"epoch":"e1"}"""
 
     private fun json(body: String) = headersOf(HttpHeaders.ContentType, "application/json") to body
 
@@ -78,7 +78,7 @@ class KtorSyncTransportTest {
     @Test
     fun `a push goes to the collection's endpoint`() =
         runTest {
-            val (headers, body) = json("""{"results":[],"latestSeq":"1"}""")
+            val (headers, body) = json("""{"results":[],"latestSeq":"1","epoch":"e1"}""")
             val transport = transport { respond(body, HttpStatusCode.OK, headers) }
 
             transport.push(

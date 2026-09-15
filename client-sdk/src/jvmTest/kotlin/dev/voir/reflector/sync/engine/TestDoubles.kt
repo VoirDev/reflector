@@ -9,6 +9,7 @@ import dev.voir.reflector.sync.core.conflict.Resolution
 import dev.voir.reflector.sync.core.metrics.SyncMetricEvent
 import dev.voir.reflector.sync.core.metrics.SyncMetrics
 import dev.voir.reflector.sync.core.transport.SyncTransport
+import dev.voir.reflector.sync.protocol.CollectionEpoch
 import dev.voir.reflector.sync.protocol.CollectionId
 import dev.voir.reflector.sync.protocol.Cursor
 import dev.voir.reflector.sync.protocol.EntityId
@@ -24,6 +25,17 @@ import kotlinx.serialization.json.JsonObject
 import kotlin.time.Clock
 import kotlin.time.Instant
 
+/** Incarnation every fake server in these tests answers from. */
+val TEST_EPOCH: CollectionEpoch = CollectionEpoch("0199fd1a-0000-7000-8000-00000000000e")
+
+/**
+ * Cursor as the server would issue it: a position inside one incarnation, never a bare sequence.
+ *
+ * @param seq Sequence of the batch the cursor points at.
+ * @return Cursor in the shape the real server produces.
+ */
+fun testCursor(seq: String): Cursor = Cursor("${TEST_EPOCH.value}.$seq")
+
 /**
  * Server the engine's tests drive by hand.
  *
@@ -38,7 +50,9 @@ class FakeTransport : SyncTransport {
     var onPush: suspend (PushRequest) -> PushResponse = { error("no push expected") }
 
     /** Answer to give to the next change-log read. */
-    var onChanges: suspend (Cursor?) -> ChangesPage = { ChangesPage(emptyList(), null, hasMore = false) }
+    var onChanges: suspend (Cursor?) -> ChangesPage = {
+        ChangesPage(emptyList(), null, hasMore = false, epoch = TEST_EPOCH)
+    }
 
     /** Answer to give to the next snapshot read. */
     var onSnapshot: suspend (PageToken?) -> SnapshotPage = { error("no snapshot expected") }

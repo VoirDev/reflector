@@ -7,6 +7,7 @@ import dev.voir.reflector.sync.core.log.SyncLogger
 import dev.voir.reflector.sync.core.metrics.SyncMetrics
 import dev.voir.reflector.sync.engine.FakeAdapter
 import dev.voir.reflector.sync.engine.FakeTransport
+import dev.voir.reflector.sync.engine.TEST_EPOCH
 import dev.voir.reflector.sync.engine.TestClock
 import dev.voir.reflector.sync.engine.mutation.MutationCoordinator
 import dev.voir.reflector.sync.engine.push.PushCoordinator
@@ -111,6 +112,7 @@ class ConflictCoordinatorTest {
                         ),
                     ),
                 latestSeq = BatchSeq("50"),
+                epoch = TEST_EPOCH,
             )
         }
         push.pushOnce()

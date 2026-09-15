@@ -57,6 +57,9 @@ object PostgresFixture {
     /** Collection every test writes to. */
     val ledger: CollectionId = CollectionId("ledger")
 
+    /** A second collection of the same scope, so that scope-wide operations have something to sweep. */
+    val archive: CollectionId = CollectionId("archive")
+
     /** Entity type the test collection accepts. */
     val wallet: EntityType = EntityType("wallet")
 
@@ -85,7 +88,11 @@ object PostgresFixture {
             database = database,
             config =
                 syncConfig(
-                    collections = setOf(CollectionSpec(ledger, setOf(wallet), maxDocumentBytes = MAX_DOCUMENT_BYTES)),
+                    collections =
+                        setOf(
+                            CollectionSpec(ledger, setOf(wallet), maxDocumentBytes = MAX_DOCUMENT_BYTES),
+                            CollectionSpec(archive, setOf(wallet), maxDocumentBytes = MAX_DOCUMENT_BYTES),
+                        ),
                     retention = retention,
                     maxOperationsPerGroup = maxOperationsPerGroup,
                 ),

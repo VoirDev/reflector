@@ -177,6 +177,10 @@ public class KtorSyncTransport(
                 throw SyncTransportFailure.Revoked("access to the scope has been revoked")
             }
 
+            response.status == HttpStatusCode.Conflict -> {
+                throw SyncTransportFailure.CollectionReset("the collection has been purged and started again")
+            }
+
             response.status == HttpStatusCode.Gone -> {
                 throw SyncTransportFailure.CursorTooOld("the cursor has fallen out of the retention window")
             }

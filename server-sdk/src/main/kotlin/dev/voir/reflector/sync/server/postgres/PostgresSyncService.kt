@@ -1,6 +1,7 @@
 package dev.voir.reflector.sync.server.postgres
 
 import dev.voir.reflector.sync.protocol.ClientId
+import dev.voir.reflector.sync.protocol.CollectionEpoch
 import dev.voir.reflector.sync.protocol.CollectionId
 import dev.voir.reflector.sync.protocol.Cursor
 import dev.voir.reflector.sync.protocol.EntityId
@@ -17,6 +18,7 @@ import dev.voir.reflector.sync.protocol.push.PushRequest
 import dev.voir.reflector.sync.protocol.push.PushResponse
 import dev.voir.reflector.sync.protocol.snapshot.SnapshotItem
 import dev.voir.reflector.sync.protocol.snapshot.SnapshotPage
+import dev.voir.reflector.sync.server.CollectionResetException
 import dev.voir.reflector.sync.server.CursorTooOldException
 import dev.voir.reflector.sync.server.ProjectionListener
 import dev.voir.reflector.sync.server.PushMetricOutcome
@@ -79,9 +81,13 @@ internal class PostgresSyncService(
         request: PushRequest,
     ): PushResponse {
         val spec = config.require(collection)
+        val logger = logger.forCollection(scope, collection)
+        // Settled before the first group is applied, never per group: a request whose collection
+        // was purged must be refused whole. Applying its first group and refusing its second would
+        // put part of the erased data back and leave the client unable to say which part.
+        val incarnation = requireIncarnation(scope, collection, request.epoch, logger)
         // Each group gets its own transaction: one request may carry several, and a conflict in one
         // must not roll back another the server has already accepted.
-        val logger = logger.forCollection(scope, collection)
         val applied =
             request.groups.map { group ->
                 val result =
@@ -126,8 +132,74 @@ internal class PostgresSyncService(
         return PushResponse(
             results = applied.map { it.result },
             latestSeq = SyncSequences.batchSeq(headSequence(scope, collection)),
+            // Whichever incarnation the work landed in. A client that claimed none learns it here
+            // and sends it from now on; one that claimed this one can be told nothing new.
+            epoch = SyncSequences.epoch(incarnation ?: collectionRowId(scope, collection)),
         )
     }
+
+    /**
+     * Checks that the client is talking about the collection that exists now.
+     *
+     * A client claiming no incarnation is one that has never synchronised this collection, and
+     * there is nothing to check: it is told which incarnation it ended up in by the answer. A client
+     * that does claim one is checked against the stored row **without creating it** — a stale push
+     * into a purged scope must not bring that scope's row back into the database it was erased from.
+     *
+     * @param scope Scope the collection belongs to.
+     * @param collection Collection being written to.
+     * @param claimed Incarnation the client believes in, or `null` when it claims none.
+     * @param logger Logger already bound to this collection.
+     * @return Identifier of the collection row the claim was checked against, or `null` when none
+     *   was claimed and nothing was looked up.
+     * @throws CollectionResetException When the claim names an incarnation that no longer exists.
+     */
+    private fun requireIncarnation(
+        scope: ScopeId,
+        collection: CollectionId,
+        claimed: CollectionEpoch?,
+        logger: SyncLogger,
+    ): Uuid? {
+        if (claimed == null) {
+            return null
+        }
+        val row = transaction(database) { collections.find(scope, collection) }
+        if (row != null && SyncSequences.epoch(row.id) == claimed) {
+            return row.id
+        }
+        reportReset(scope, collection, claimed, logger)
+        throw CollectionResetException(collection, claimed)
+    }
+
+    /**
+     * Says that somebody is still carrying a collection that was erased.
+     *
+     * Counted and logged in one place for every path it can arrive on, because the number that
+     * matters is per installation rather than per operation: an erasure is finished when these stop
+     * arriving, and that is not visible from any one of the three paths alone.
+     *
+     * @param scope Scope the client addressed.
+     * @param collection Collection the client addressed.
+     * @param claimed Incarnation the client believes in.
+     * @param logger Logger already bound to this collection.
+     */
+    private fun reportReset(
+        scope: ScopeId,
+        collection: CollectionId,
+        claimed: CollectionEpoch,
+        logger: SyncLogger,
+    ) {
+        metrics.emit(SyncMetricEvent.CollectionResetRefused(scope, collection), logger)
+        logger.info(
+            SyncLogEvent.COLLECTION_RESET_REFUSED,
+            context = { mapOf("epoch" to claimed.value) },
+        ) { "a client is still following a collection that was purged; it has to discard it and rebuild" }
+    }
+
+    private fun collectionRowId(
+        scope: ScopeId,
+        collection: CollectionId,
+    ): Uuid = transaction(database) { collections.ensure(scope, collection).id }
 
     override fun changes(
         scope: ScopeId,
@@ -142,8 +214,24 @@ internal class PostgresSyncService(
             try {
                 transaction(database) {
                     config.require(collection)
-                    val row = collections.ensure(scope, collection)
-                    val from = cursor?.let(SyncSequences::sequenceOf) ?: (row.retentionFloorSeq - 1)
+                    // A cursor names an incarnation as well as a position, so a client that has one
+                    // is checked against the stored row rather than allowed to create it: a reader
+                    // arriving after a purge must not put the erased scope back in the database.
+                    val position = cursor?.let(SyncSequences::positionOf)
+                    val row =
+                        when (position) {
+                            null -> collections.ensure(scope, collection)
+                            else -> collections.find(scope, collection)
+                        }
+                    if (position != null && position.collectionRowId != row?.id) {
+                        // The log this cursor points into no longer exists. Serving the new one from
+                        // the same offset would hand the client a page that reads like a
+                        // continuation and is nothing of the sort.
+                        throw CollectionResetException(collection, SyncSequences.epoch(position.collectionRowId))
+                    }
+                    checkNotNull(row) { "a collection without a cursor must have been created" }
+                    val from = position?.seq ?: (row.retentionFloorSeq - 1)
+                    val head = row.nextSeq - 1
                     if (cursor != null && from < row.retentionFloorSeq - 1) {
                         // The changes between the client's position and the window are gone. Serving
                         // what is left would leave it silently missing them; refusing sends it to a
@@ -152,6 +240,13 @@ internal class PostgresSyncService(
                         // neither belongs inside a transaction.
                         behindFloor = row.retentionFloorSeq - 1 - from
                         throw CursorTooOldException(cursor)
+                    }
+                    if (position != null && from > head) {
+                        // The incarnation matches and the position is still ahead of the head, so
+                        // this log did not restart — it went backwards, which only a restore from a
+                        // backup does. The client's answer is the same as after a purge: what it
+                        // holds describes a history the server no longer has.
+                        throw CollectionResetException(collection, SyncSequences.epoch(row.id))
                     }
 
                     val capped = limit.coerceIn(1, config.maxChangesPageSize)
@@ -174,18 +269,24 @@ internal class PostgresSyncService(
                                     batches.map { batch ->
                                         ChangeBatch(
                                             seq = SyncSequences.batchSeq(batch[BatchesTable.seq]),
+                                            cursor = SyncSequences.cursor(row.id, batch[BatchesTable.seq]),
                                             originClientId = batch[BatchesTable.originClientId]?.let(::ClientId),
                                             ops = operations[batch[BatchesTable.id].value].orEmpty(),
                                         )
                                     },
-                                nextCursor = batches.lastOrNull()?.let { SyncSequences.cursor(it[BatchesTable.seq]) },
+                                nextCursor =
+                                    batches.lastOrNull()?.let { SyncSequences.cursor(row.id, it[BatchesTable.seq]) },
                                 hasMore = hasMore,
+                                epoch = SyncSequences.epoch(row.id),
                             ),
                         // How far behind the head the client was when it asked. The subtraction is the
                         // server's to do: to the client a cursor is an opaque token with no arithmetic.
-                        cursorLag = (row.nextSeq - 1) - from,
+                        cursorLag = head - from,
                     )
                 }
+            } catch (failure: CollectionResetException) {
+                reportReset(scope, collection, failure.epoch, logger)
+                throw failure
             } catch (failure: CursorTooOldException) {
                 // Each of these is a whole-collection snapshot transfer about to happen. A few are a
                 // device that was switched off for a while; a rising count means the retention
@@ -252,44 +353,11 @@ internal class PostgresSyncService(
                 throw failure
             }
         val served =
-            transaction(database) {
-                config.require(collection)
-                val row = collections.ensure(scope, collection)
-                // The cursor is fixed before the first page and then carried in the page token. Anything
-                // committed during the transfer is replayed from it, which is why repeats are harmless
-                // and gaps impossible.
-                val cursor = token?.cursor ?: (row.nextSeq - 1)
-                val capped = limit.coerceIn(1, config.maxChangesPageSize)
-
-                val rows =
-                    EntitiesTable
-                        .selectAll()
-                        .where { entitiesAfter(row.id, token) }
-                        .orderBy(EntitiesTable.entityType to SortOrder.ASC, EntitiesTable.entityId to SortOrder.ASC)
-                        .limit(capped + 1)
-                        .toList()
-
-                val hasMore = rows.size > capped
-                val items =
-                    rows.take(capped).map { entity ->
-                        SnapshotItem(
-                            entity = EntityType(entity[EntitiesTable.entityType]),
-                            id = EntityId(entity[EntitiesTable.entityId]),
-                            version = SyncSequences.version(entity[EntitiesTable.version]),
-                            data = checkNotNull(entity[EntitiesTable.data]) { "a live entity must have a document" },
-                        )
-                    }
-
-                SnapshotPage(
-                    cursor = SyncSequences.cursor(cursor),
-                    items = items,
-                    nextPage =
-                        items
-                            .lastOrNull()
-                            ?.takeIf { hasMore }
-                            ?.let { SnapshotCursorToken(it.entity, it.id, cursor).encode() },
-                    hasMore = hasMore,
-                )
+            try {
+                snapshotPage(scope, collection, token, limit)
+            } catch (failure: CollectionResetException) {
+                reportReset(scope, collection, failure.epoch, logger)
+                throw failure
             }
 
         val took = clock.now() - startedAt
@@ -307,10 +375,82 @@ internal class PostgresSyncService(
         return served
     }
 
+    /**
+     * Reads one page of a snapshot.
+     *
+     * @param scope Scope the collection belongs to.
+     * @param collection Collection to read.
+     * @param token Decoded continuation token, or `null` for the first page.
+     * @param limit Largest number of entities to return.
+     * @return Page of entities together with the cursor the log has to be resumed from.
+     * @throws CollectionResetException When the token belongs to an incarnation that is gone.
+     */
+    private fun snapshotPage(
+        scope: ScopeId,
+        collection: CollectionId,
+        token: SnapshotCursorToken?,
+        limit: Int,
+    ): SnapshotPage =
+        transaction(database) {
+            config.require(collection)
+            val row =
+                when (token) {
+                    null -> collections.ensure(scope, collection)
+                    else -> collections.find(scope, collection)
+                }
+            if (token != null && token.collectionRowId != row?.id) {
+                // The collection was purged between two pages of this transfer. Continuing would
+                // staple the pages of one log onto the pages of another.
+                throw CollectionResetException(collection, SyncSequences.epoch(token.collectionRowId))
+            }
+            checkNotNull(row) { "a snapshot without a token must have created the collection" }
+            // The cursor is fixed before the first page and then carried in the page token. Anything
+            // committed during the transfer is replayed from it, which is why repeats are harmless
+            // and gaps impossible.
+            val cursor = token?.cursor ?: (row.nextSeq - 1)
+            val capped = limit.coerceIn(1, config.maxChangesPageSize)
+
+            val rows =
+                EntitiesTable
+                    .selectAll()
+                    .where { entitiesAfter(row.id, token) }
+                    .orderBy(EntitiesTable.entityType to SortOrder.ASC, EntitiesTable.entityId to SortOrder.ASC)
+                    .limit(capped + 1)
+                    .toList()
+
+            val hasMore = rows.size > capped
+            val items =
+                rows.take(capped).map { entity ->
+                    SnapshotItem(
+                        entity = EntityType(entity[EntitiesTable.entityType]),
+                        id = EntityId(entity[EntitiesTable.entityId]),
+                        version = SyncSequences.version(entity[EntitiesTable.version]),
+                        data = checkNotNull(entity[EntitiesTable.data]) { "a live entity must have a document" },
+                    )
+                }
+
+            SnapshotPage(
+                cursor = SyncSequences.cursor(row.id, cursor),
+                items = items,
+                nextPage =
+                    items
+                        .lastOrNull()
+                        ?.takeIf { hasMore }
+                        ?.let { SnapshotCursorToken(row.id, it.entity, it.id, cursor).encode() },
+                hasMore = hasMore,
+                epoch = SyncSequences.epoch(row.id),
+            )
+        }
+
     override fun head(
         scope: ScopeId,
         collection: CollectionId,
-    ): Cursor = SyncSequences.cursor(headSequence(scope, collection))
+    ): Cursor =
+        transaction(database) {
+            config.require(collection)
+            val row = collections.ensure(scope, collection)
+            SyncSequences.cursor(row.id, row.nextSeq - 1)
+        }
 
     override fun limits(): SyncLimits =
         SyncLimits(

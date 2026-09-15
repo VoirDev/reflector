@@ -18,6 +18,7 @@ import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 import kotlin.time.Duration.Companion.days
 import kotlin.uuid.Uuid
@@ -87,12 +88,15 @@ class SyncLogTest {
     fun `a refused cursor says how far behind the window it was`() {
         val module = PostgresFixture.module(clock = clock, retention = 1.days, log = logs)
         pushOne(module)
-        val stale = module.service.changes(scope, ledger, null, 10).nextCursor
-        clock.instant += 2.days
-        module.maintenance.trim()
+        // Taken after the first batch and before the second, so that the sweep leaves a batch this
+        // cursor has not seen: a cursor at the floor is still served, and only one behind it is not.
+        val stale = assertNotNull(module.service.changes(scope, ledger, null, 10).nextCursor)
         pushOne(module, index = 2)
+        clock.instant += 2.days
+        pushOne(module, index = 3)
+        module.maintenance.trim()
 
-        assertFailsWith<CursorTooOldException> { module.service.changes(scope, ledger, Cursor("0"), 10) }
+        assertFailsWith<CursorTooOldException> { module.service.changes(scope, ledger, stale, 10) }
 
         // Each of these is a whole-collection transfer about to happen; how far behind says whether
         // the window is merely short for one device or too short for the population.
@@ -101,7 +105,6 @@ class SyncLogTest {
         assertEquals(ledger, refused.collection)
         assertTrue(refused.context.getValue("behindFloor").toLong() > 0)
         assertEquals(scope, refused.scope)
-        assertTrue(stale != null)
     }
 
     @Test

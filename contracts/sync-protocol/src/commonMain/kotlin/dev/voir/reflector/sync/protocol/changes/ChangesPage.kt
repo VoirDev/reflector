@@ -1,5 +1,6 @@
 package dev.voir.reflector.sync.protocol.changes
 
+import dev.voir.reflector.sync.protocol.CollectionEpoch
 import dev.voir.reflector.sync.protocol.Cursor
 import kotlinx.serialization.Serializable
 
@@ -13,10 +14,14 @@ import kotlinx.serialization.Serializable
  * @property hasMore Whether the server withheld further batches because of the page limit. It says
  *   nothing about changes committed after the page was read, so a `false` here does not mean the
  *   client is up to date.
+ * @property epoch Incarnation of the collection this page was read from. It is stored next to the
+ *   cursor and sent with the next push; a page can never carry an epoch other than the one the
+ *   client asked under, because a cursor from another incarnation is refused rather than served.
  */
 @Serializable
 public data class ChangesPage(
     public val batches: List<ChangeBatch>,
     public val nextCursor: Cursor?,
     public val hasMore: Boolean,
+    public val epoch: CollectionEpoch,
 )

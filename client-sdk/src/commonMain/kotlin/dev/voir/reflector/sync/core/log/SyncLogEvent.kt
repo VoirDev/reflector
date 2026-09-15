@@ -49,6 +49,17 @@ public enum class SyncLogEvent(
     RESYNC_REQUIRED(SyncLogSource.ENGINE),
 
     /**
+     * The server's collection turned out to be a different one, and the local copy was discarded.
+     *
+     * The loudest thing this library does on its own: rows the user could see are deleted and
+     * changes that never reached the server are abandoned, because the collection they belonged to
+     * was purged. Reported at `WARN` and with what was given up, since it is the one case where a
+     * user can lose work without anybody on the device having asked for it — and the answer to
+     * "where did my unsent edits go" has to exist somewhere.
+     */
+    COLLECTION_RESET(SyncLogSource.ENGINE),
+
+    /**
      * The queue stopped draining and nothing the library does will restart it.
      *
      * Reported when the collection enters that state, not once per cycle: a line per timer tick

@@ -29,6 +29,6 @@ public enum class SyncLogSource(
     /** Serving pages of a snapshot to a client that is rebuilding a collection. */
     SNAPSHOT("snapshot"),
 
-    /** Trimming history to the retention window. */
+    /** Trimming history to the retention window, and purging a scope or a collection outright. */
     MAINTENANCE("maintenance"),
 }

@@ -1,5 +1,6 @@
 package dev.voir.reflector.sync.server
 
+import dev.voir.reflector.sync.protocol.CollectionEpoch
 import dev.voir.reflector.sync.protocol.CollectionId
 import dev.voir.reflector.sync.protocol.Cursor
 import dev.voir.reflector.sync.protocol.EntityType
@@ -37,6 +38,27 @@ public sealed class SyncServerException(
     ) : SyncServerException("collection ${collection.value} is not registered")
 
     /**
+     * The collection the client refers to is not the one that exists now.
+     *
+     * It was purged and has begun again, so the client's cursor, its versions and its queue all
+     * describe a log that no longer exists. The host answers `409`, and the client discards what it
+     * has for that collection — pending changes included — and rebuilds from a snapshot.
+     *
+     * Distinct from [CursorTooOldException], which the client answers with a bootstrap that keeps
+     * its local edits. Here there is nothing for those edits to be edits *of*: keeping them would
+     * put back, entity by entity, the data the purge was run to remove.
+     *
+     * @property collection Collection the client addressed.
+     * @property epoch Incarnation the client believes it is talking to.
+     */
+    public class CollectionResetException(
+        public val collection: CollectionId,
+        public val epoch: CollectionEpoch,
+    ) : SyncServerException(
+            "collection ${collection.value} is no longer the one epoch ${epoch.value} named; it has been purged",
+        )
+
+    /**
      * The entity type is not accepted by the collection.
      *
      * Reported to the client as a refused group rather than thrown to the host: it is bad data, not
@@ -56,6 +78,9 @@ public typealias CursorTooOldException = SyncServerException.CursorTooOldExcepti
 
 /** Shorthand for [SyncServerException.UnknownCollectionException]. */
 public typealias UnknownCollectionException = SyncServerException.UnknownCollectionException
+
+/** Shorthand for [SyncServerException.CollectionResetException]. */
+public typealias CollectionResetException = SyncServerException.CollectionResetException
 
 /** Shorthand for [SyncServerException.UnknownEntityTypeException]. */
 public typealias UnknownEntityTypeException = SyncServerException.UnknownEntityTypeException

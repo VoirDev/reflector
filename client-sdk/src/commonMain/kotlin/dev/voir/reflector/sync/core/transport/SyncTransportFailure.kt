@@ -62,6 +62,24 @@ public sealed class SyncTransportFailure(
     ) : SyncTransportFailure(message)
 
     /**
+     * The collection on the server is not the one this client has been following.
+     *
+     * It was purged and has begun again. Everything stored locally under the old incarnation — the
+     * cursor, the versions, the queue of changes that never left — describes a log that no longer
+     * exists, and the client discards all of it and rebuilds from a snapshot.
+     *
+     * Deliberately not a [CursorTooOld]. Both send the collection to a snapshot, but that one keeps
+     * the local edits, which is right when the history merely aged out from under a client. Here it
+     * would be wrong: those edits would go back up as new entities and put back, one at a time, the
+     * data the purge was run to remove.
+     *
+     * @property message Description reported by the server.
+     */
+    public class CollectionReset(
+        message: String,
+    ) : SyncTransportFailure(message)
+
+    /**
      * Access to the scope has been revoked.
      *
      * @property message Description reported by the server.

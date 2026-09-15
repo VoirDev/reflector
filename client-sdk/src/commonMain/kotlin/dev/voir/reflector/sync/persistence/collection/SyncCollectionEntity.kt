@@ -19,6 +19,10 @@ import dev.voir.reflector.sync.persistence.SyncColumnConverters
  * @property collectionId Identifier of the collection.
  * @property cursor Opaque position in the change log, or `null` when nothing has been read yet.
  *   Advanced only together with applying the batch it points at.
+ * @property epoch Incarnation of the collection on the server this row's cursor, versions and
+ *   queue belong to, or `null` before the first answer from it. A server that answers with a
+ *   different one has replaced the collection since — the cursor no longer means what it meant,
+ *   and everything stored under it is discarded rather than carried across.
  * @property phase Lifecycle phase, which decides who is allowed to run.
  * @property generation Bootstrap counter, incremented at the start of every bootstrap. Records
  *   touched by the current bootstrap carry it, and everything left behind is swept afterwards.
@@ -41,6 +45,7 @@ public data class SyncCollectionEntity(
     @ColumnInfo(name = "scope_id") public val scopeId: String,
     @ColumnInfo(name = "collection_id") public val collectionId: String,
     @ColumnInfo(name = "cursor") public val cursor: String?,
+    @ColumnInfo(name = "epoch") public val epoch: String?,
     @ColumnInfo(name = "phase") public val phase: SyncPhase,
     @ColumnInfo(name = "generation") public val generation: Long,
     @ColumnInfo(name = "bootstrap_page") public val bootstrapPage: String?,

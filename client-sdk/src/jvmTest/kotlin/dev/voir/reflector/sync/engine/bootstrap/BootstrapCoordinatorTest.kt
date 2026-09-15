@@ -8,8 +8,10 @@ import dev.voir.reflector.sync.core.transport.SyncTransportFailure
 import dev.voir.reflector.sync.engine.FakeAdapter
 import dev.voir.reflector.sync.engine.FakeTransport
 import dev.voir.reflector.sync.engine.RecordingMetrics
+import dev.voir.reflector.sync.engine.TEST_EPOCH
 import dev.voir.reflector.sync.engine.TestClock
 import dev.voir.reflector.sync.engine.mutation.MutationCoordinator
+import dev.voir.reflector.sync.engine.testCursor
 import dev.voir.reflector.sync.openTestDatabase
 import dev.voir.reflector.sync.persistence.RoomSyncTransactionRunner
 import dev.voir.reflector.sync.persistence.SyncStores
@@ -86,7 +88,7 @@ class BootstrapCoordinatorTest {
     private fun snapshot(
         vararg items: SnapshotItem,
         cursor: String = "1100",
-    ) = SnapshotPage(Cursor(cursor), items.toList(), nextPage = null, hasMore = false)
+    ) = SnapshotPage(testCursor(cursor), items.toList(), nextPage = null, hasMore = false, epoch = TEST_EPOCH)
 
     @Test
     fun `a snapshot is applied and the collection goes live at the fixed cursor`() =
@@ -98,7 +100,7 @@ class BootstrapCoordinatorTest {
             assertEquals(body("Cash"), adapter.bodies[wallet to entity(1)])
             val state = assertNotNull(stores.collections.find(scope, collection))
             assertEquals(SyncPhase.LIVE, state.phase)
-            assertEquals(Cursor("1100"), state.cursor)
+            assertEquals(testCursor("1100"), state.cursor)
             assertNull(state.bootstrapPage)
             val record = assertNotNull(stores.records.find(scope, collection, wallet, entity(2)))
             assertEquals(EntityVersion("11"), record.serverVersion)
@@ -160,7 +162,7 @@ class BootstrapCoordinatorTest {
         runTest {
             transport.onSnapshot = { page ->
                 if (page == null) {
-                    SnapshotPage(Cursor("1100"), listOf(item(1, "10", "Cash")), PageToken("p2"), hasMore = true)
+                    SnapshotPage(testCursor("1100"), listOf(item(1, "10", "Cash")), PageToken("p2"), true, TEST_EPOCH)
                 } else {
                     throw SyncTransportFailure.Unreachable("offline")
                 }
@@ -174,13 +176,17 @@ class BootstrapCoordinatorTest {
             // everything committed in between exists only in the log it is about to read.
             transport.onSnapshot = { page ->
                 assertEquals(PageToken("p2"), page)
-                SnapshotPage(Cursor("9999"), listOf(item(2, "11", "Card")), nextPage = null, hasMore = false)
+                SnapshotPage(testCursor("9999"), listOf(item(2, "11", "Card")), null, false, TEST_EPOCH)
             }
 
             assertEquals(BootstrapOutcome.Completed, coordinator.bootstrap())
 
             val state = assertNotNull(stores.collections.find(scope, collection))
-            assertEquals(Cursor("1100"), state.cursor, "resuming must not skip what was committed during the transfer")
+            assertEquals(
+                testCursor("1100"),
+                state.cursor,
+                "resuming must not skip what was committed during the transfer",
+            )
             assertEquals(SyncPhase.LIVE, state.phase)
             assertNotNull(stores.records.find(scope, collection, wallet, entity(1)))
             assertNotNull(stores.records.find(scope, collection, wallet, entity(2)))

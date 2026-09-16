@@ -12,6 +12,7 @@ import dev.voir.reflector.sync.core.metrics.SyncMetrics
 import dev.voir.reflector.sync.core.metrics.emit
 import dev.voir.reflector.sync.core.transport.SyncTransport
 import dev.voir.reflector.sync.core.transport.SyncTransportFailure
+import dev.voir.reflector.sync.engine.blob.BlobReferences
 import dev.voir.reflector.sync.persistence.SyncStores
 import dev.voir.reflector.sync.persistence.SyncTransactionRunner
 import dev.voir.reflector.sync.protocol.CollectionId
@@ -61,6 +62,7 @@ internal class BootstrapCoordinator(
     private val log: SyncLogger,
     private val clock: Clock,
     private val newUuid: () -> Uuid,
+    private val references: BlobReferences? = null,
 ) {
     /**
      * Runs a bootstrap, resuming an interrupted one when there is something to resume.
@@ -138,7 +140,9 @@ internal class BootstrapCoordinator(
             stores.collections.finishBootstrap(
                 scope = scope,
                 collection = collection,
-                cursor = cursor ?: error("a finished snapshot must have produced a cursor"),
+                // Non-null by the shape of the loop above: the only way out of it that reaches here
+                // runs the body at least once, and the body fixes the cursor before it can break.
+                cursor = cursor,
             )
         }
         // Only a bootstrap that finished is reported, and it reports its own pages alone: a run
@@ -204,6 +208,11 @@ internal class BootstrapCoordinator(
         }
         if (toApply.isNotEmpty()) {
             adapter.applyRemote(toApply)
+            for (op in toApply) {
+                if (op is RemoteOp.Upsert) {
+                    references?.declare(op.entityType, op.id, op.data, generation)
+                }
+            }
         }
     }
 
@@ -264,6 +273,10 @@ internal class BootstrapCoordinator(
         ) { "entities the snapshot did not mention were deleted from the application's tables" }
         adapter.applyRemote(stale.map { RemoteOp.Delete(it.entityType, it.entityId) })
         stores.records.deleteStale(scope, collection, generation)
+        // References follow their documents out. A file the swept documents were the last to name
+        // then has nothing pointing at it, which is how a device learns about an attachment that was
+        // detached while it was away — there is no tombstone for that either.
+        references?.sweep(generation)
     }
 
     private suspend fun handleFailure(failure: SyncTransportFailure): BootstrapOutcome =

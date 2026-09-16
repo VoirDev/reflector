@@ -34,6 +34,9 @@ public enum class SyncLogSource(
     /** The lifecycle of conflicts, wherever they were detected. */
     CONFLICT("conflict"),
 
+    /** Working out what documents point at, and moving the files they name. */
+    BLOBS("blobs"),
+
     /** HTTP requests to the server and the credentials attached to them. */
     TRANSPORT("transport"),
 

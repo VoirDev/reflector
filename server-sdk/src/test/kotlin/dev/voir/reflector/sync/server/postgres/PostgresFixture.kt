@@ -5,6 +5,9 @@ import com.zaxxer.hikari.HikariDataSource
 import dev.voir.reflector.sync.protocol.CollectionId
 import dev.voir.reflector.sync.protocol.EntityType
 import dev.voir.reflector.sync.protocol.ScopeId
+import dev.voir.reflector.sync.server.BlobConfig
+import dev.voir.reflector.sync.server.BlobListener
+import dev.voir.reflector.sync.server.BlobStorage
 import dev.voir.reflector.sync.server.CollectionSpec
 import dev.voir.reflector.sync.server.ProjectionListener
 import dev.voir.reflector.sync.server.SyncCommitListener
@@ -14,7 +17,7 @@ import dev.voir.reflector.sync.server.SyncMetrics
 import dev.voir.reflector.sync.server.syncConfig
 import org.jetbrains.exposed.v1.jdbc.Database
 import org.jetbrains.exposed.v1.jdbc.transactions.transaction
-import org.testcontainers.containers.PostgreSQLContainer
+import org.testcontainers.postgresql.PostgreSQLContainer
 import kotlin.time.Clock
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.days
@@ -73,6 +76,9 @@ object PostgresFixture {
      * @param projections Listeners notified inside the transaction.
      * @param metrics Sink the module reports its measurements to.
      * @param log Sink the module's own account of what it did goes to.
+     * @param blobs Configuration of files, or `null` to assemble a module that serves none.
+     * @param blobStorage The host's object storage; required exactly when [blobs] is given.
+     * @param blobListeners Told when a blob's bytes are accepted.
      * @return Freshly assembled module.
      */
     fun module(
@@ -83,6 +89,9 @@ object PostgresFixture {
         projections: List<ProjectionListener> = emptyList(),
         metrics: SyncMetrics = SyncMetrics.None,
         log: SyncLog = SyncLog.None,
+        blobs: BlobConfig? = null,
+        blobStorage: BlobStorage? = null,
+        blobListeners: List<BlobListener> = emptyList(),
     ): SyncModule =
         SyncModule.create(
             database = database,
@@ -95,18 +104,24 @@ object PostgresFixture {
                         ),
                     retention = retention,
                     maxOperationsPerGroup = maxOperationsPerGroup,
+                    blobs = blobs,
                 ),
             clock = clock,
             commitListeners = commitListeners,
             projections = projections,
             metrics = metrics,
             log = log,
+            blobStorage = blobStorage,
+            blobListeners = blobListeners,
         )
 
     /** Empties every table so that one test cannot see another's rows. */
     fun reset() {
         transaction(database) {
-            exec("TRUNCATE sync.collections, sync.batches, sync.changes, sync.entities, sync.push_results CASCADE")
+            exec(
+                "TRUNCATE sync.collections, sync.batches, sync.changes, sync.entities, " +
+                    "sync.push_results, sync.blobs, sync.blob_refs CASCADE",
+            )
         }
     }
 

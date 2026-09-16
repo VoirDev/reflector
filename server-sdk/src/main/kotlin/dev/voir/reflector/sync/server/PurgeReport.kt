@@ -16,6 +16,10 @@ package dev.voir.reflector.sync.server
  * @property changes Individual changes removed, across every batch.
  * @property entities Entity rows removed, tombstones included.
  * @property pushResults Stored push outcomes removed, which is the idempotency history.
+ * @property blobs Blob rows removed, which is how many files the collection was carrying and how
+ *   many keys were handed to the host for disposal. What became of the objects is not here: the
+ *   module hands them over and forms no opinion, and the host's own storage log is both where that
+ *   is recorded and the only evidence of it an auditor would accept.
  */
 public data class PurgeReport(
     public val collections: Int,
@@ -23,10 +27,11 @@ public data class PurgeReport(
     public val changes: Int,
     public val entities: Int,
     public val pushResults: Int,
+    public val blobs: Int = 0,
 ) {
     /** Whether nothing was there to remove. */
     public val isEmpty: Boolean
-        get() = collections == 0 && batches == 0 && changes == 0 && entities == 0 && pushResults == 0
+        get() = collections == 0 && batches == 0 && changes == 0 && entities == 0 && pushResults == 0 && blobs == 0
 
     /**
      * Adds up two reports, so that a scope can be reported as the sum of its collections.
@@ -41,10 +46,11 @@ public data class PurgeReport(
             changes = changes + other.changes,
             entities = entities + other.entities,
             pushResults = pushResults + other.pushResults,
+            blobs = blobs + other.blobs,
         )
 
     public companion object {
         /** Report of a purge that found nothing. */
-        public val Empty: PurgeReport = PurgeReport(0, 0, 0, 0, 0)
+        public val Empty: PurgeReport = PurgeReport(0, 0, 0, 0, 0, 0)
     }
 }

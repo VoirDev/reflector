@@ -14,6 +14,7 @@ TODO.md                      Work that is known and not yet done
 docs/
   sync-client-design.md      Client library specification
   sync-server-design.md      Server module specification
+  sync-files-design.md       File specification: blobs, references, and who owns the bytes
 .claude/settings.json        Enables the `handbooks` plugin, which carries the engineering standard
 contracts/
   sync-protocol/             Protocol wire contracts shared by client and server
@@ -97,6 +98,9 @@ Key invariants that cannot be broken without rewriting the specification:
 
 - the SDK **does not own business records**: entity bodies are materialised lazily through
   the application's adapter, and the library stores only sync metadata;
+- the SDK **does not own files either**: bytes live in the application's own store and travel
+  between the device and the host's storage directly, and what a document references is whatever
+  the adapter says it does;
 - the SDK's tables live in the same `RoomDatabase` as the application's tables — otherwise
   applying changes and advancing the cursor could not be done in one transaction;
 - a collection's cursor advances only together with the application of a batch;
@@ -121,6 +125,8 @@ Invariants that cannot be broken without rewriting the specification:
 - a cursor points at a batch's seq, not at an individual change;
 - an entity's version equals the seq of the batch of its last change;
 - the module stores documents as opaque `jsonb` and does not model business entities;
+- the module never touches a file: it hands out permission to move bytes, is told what arrived, and
+  hands released keys back to the host, which owns disposal;
 - the history retention window and the cursor's lifetime are the same number;
 - the commit listener is called after the transaction, the projection inside it;
 - the module lives in its own `sync` schema with its own Flyway history;

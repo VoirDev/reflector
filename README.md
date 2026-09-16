@@ -11,10 +11,11 @@ rows stay yours: your schema, your queries, your migrations.
 - [EXAMPLE.md](EXAMPLE.md) — integrating the server and the client, step by step
 - [docs/sync-client-design.md](docs/sync-client-design.md) — the client specification
 - [docs/sync-server-design.md](docs/sync-server-design.md) — the server specification
+- [docs/sync-files-design.md](docs/sync-files-design.md) — the file specification
 - [TODO.md](TODO.md) — work that is known and not yet done
 - [AGENTS.md](AGENTS.md) — repository rules, and which handbook skills to read before changing code
 
-The two specifications are the source of truth for the mechanism. What follows is the shape of it
+The three specifications are the source of truth for the mechanism. What follows is the shape of it
 and the reasoning behind the choices.
 
 ---
@@ -162,6 +163,52 @@ application's tables have drifted from what it synchronised — a migration, a r
 import from the side. When that happens, a bootstrap is cheaper than trusting a cursor whose data
 changed underneath it. Unsent local changes survive a resync and are pushed afterwards.
 
+### Files travel beside the log, never through it
+
+A photograph is not a document. Base64 into one puts megabytes through a protocol built for
+kilobytes and into a `jsonb` column, so files are a **blob**: an immutable sequence of bytes with a
+client-generated identifier, which the document references by an ordinary field of its own.
+
+Immutable is what makes the rest cheap. A blob cannot conflict — there is no version to compare and
+no merge two JPEGs could have — so replacing a photograph is an ordinary document change that
+happens to move a reference, and every operation on a blob is idempotent without being engineered
+to be.
+
+Neither SDK is ever in the data path. The client asks the server to register a file, the server asks
+the host to presign a URL, and the bytes go from the device to the host's storage directly. What the
+module keeps is metadata about an object it has never seen; what the library keeps is the same, plus
+the decision about when each file may move.
+
+```kotlin
+override fun blobs(entityType: EntityType, id: EntityId, document: JsonObject): Set<BlobRef> =
+    setOf(BlobRef(photoIdOf(document)))     // deferred by default
+```
+
+That is the whole coupling between business data and files, and it carries two editorial decisions.
+The first: **a record may be published before its file**. A receipt is not a transaction, and a
+library that holds up money because a photograph is stuck behind a hotel's captive portal has its
+priorities backwards. `DEFERRED` — the default — waits only for the file to be *registered*, which
+is a round trip rather than a transfer; `REQUIRED` waits for the bytes, and is for a record whose
+file is its content.
+
+The receiving side never waits at all: the document arrives, the cursor advances, and the bytes
+follow. "Referenced and not here yet" is therefore a normal state a user interface has to render,
+not a failure — and the library publishes it per file so that it can.
+
+The second decision is that state's other reading: **a device need not hold every file it knows
+about**. `EAGER` — the default, set on the engine and overridable per reference — fetches the bytes
+as soon as a document names them, which is what a list of thumbnails wants. `ON_DEMAND` records the
+reference and fetches nothing until the application asks, through `collection.fetch(blobId)`, which
+is what a forty-megabyte original wants: the record is on the device, the reference is on the
+device, and the bytes arrive when a screen opens them and stay until `evict` gives them up. Nothing
+about the protocol changes between the two — a download ticket was always asked for one file at a
+time by a device that decided it wanted it.
+
+Deleting is the host's. The module knows which files nothing points at any more, because clients
+declare their references on every push; it drops its own rows and hands over the keys. What disposal
+means — delete now, a lifecycle rule, a retention period somebody legislated — is a policy the
+module has no business holding.
+
 ### Real time is an alarm clock, not a data path
 
 The WebSocket carries `invalidate`, `resync` and `revoked`. It never carries data. One application
@@ -234,8 +281,16 @@ GET  /v1/sync/config                              → limits and retention windo
 POST /v1/sync/{scope}/{collection}/push           → {applied | conflict | rejected} per group
 GET  /v1/sync/{scope}/{collection}/changes?cursor= → batches, nextCursor, hasMore, epoch
 GET  /v1/sync/{scope}/{collection}/snapshot?page=  → cursor, items, nextPage, hasMore, epoch
-WS   /v1/sync/{scope}/events                       → invalidate | resync | revoked
+WS   /v1/sync/{scope}/events                       → invalidate | resync | revoked | blobReady
+
+POST /v1/sync/{scope}/{collection}/blobs                   → register, and an upload ticket
+POST /v1/sync/{scope}/{collection}/blobs/{id}/complete     → verify the bytes and accept them
+GET  /v1/sync/{scope}/{collection}/blobs/{id}              → a download ticket
 ```
+
+The three file endpoints are served only by a deployment that configures storage. One that does not
+publishes no file limits, and a client configured for files learns that at start-up rather than on a
+user's first attachment.
 
 Rules the server must honour, in full, are listed in §11 of the
 [client specification](docs/sync-client-design.md). The ones that bite hardest:

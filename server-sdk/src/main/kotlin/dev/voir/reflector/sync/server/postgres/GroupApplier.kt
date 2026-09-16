@@ -1,10 +1,10 @@
 package dev.voir.reflector.sync.server.postgres
 
+import dev.voir.reflector.sync.protocol.BlobId
 import dev.voir.reflector.sync.protocol.CollectionId
 import dev.voir.reflector.sync.protocol.EntityId
 import dev.voir.reflector.sync.protocol.EntityType
 import dev.voir.reflector.sync.protocol.ScopeId
-import dev.voir.reflector.sync.protocol.SyncProtocolJson
 import dev.voir.reflector.sync.protocol.push.AppliedVersion
 import dev.voir.reflector.sync.protocol.push.ConflictEntry
 import dev.voir.reflector.sync.protocol.push.PushGroup
@@ -17,6 +17,7 @@ import dev.voir.reflector.sync.server.CollectionSpec
 import dev.voir.reflector.sync.server.ProjectionListener
 import dev.voir.reflector.sync.server.PushMetricOutcome
 import dev.voir.reflector.sync.server.SyncConfig
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import org.jetbrains.exposed.v1.core.and
 import org.jetbrains.exposed.v1.core.eq
@@ -46,6 +47,8 @@ internal class GroupApplier(
     private val projections: List<ProjectionListener>,
     private val clock: Clock,
 ) {
+    private val references = BlobReferences()
+
     /**
      * Applies one group and returns what to answer, together with the sequence it produced.
      *
@@ -76,7 +79,7 @@ internal class GroupApplier(
         // rather than against the end of this method, which is not where the lock is released.
         val lockedAt = clock.now()
 
-        rejectionOf(spec, group)?.let { rejection ->
+        rejectionOf(collectionRow.id, spec, group)?.let { rejection ->
             val result = PushGroupResult.Rejected(group.groupId, rejection)
             store(collectionRow.id, clientId, group.groupId.value, STATUS_REJECTED, result)
             return AppliedGroup(result, committedSeq = null, outcome = PushMetricOutcome.REJECTED, lockedAt = lockedAt)
@@ -99,7 +102,16 @@ internal class GroupApplier(
         return AppliedGroup(result, committedSeq = seq, outcome = PushMetricOutcome.APPLIED, lockedAt = lockedAt)
     }
 
+    /**
+     * Finds the reason a group cannot be applied at all, if there is one.
+     *
+     * Runs under the counter lock, which is why the one query it adds is a single indexed read of at
+     * most one row per distinct blob in the group. It has to be under the lock rather than before
+     * it: what it checks is that the referenced blobs exist, and the sweep that could remove one
+     * takes the same lock, so checking outside it would leave exactly the race the check is for.
+     */
     private fun rejectionOf(
+        collectionRowId: Uuid,
         spec: CollectionSpec,
         group: PushGroup,
     ): RejectError? {
@@ -132,8 +144,49 @@ internal class GroupApplier(
                     message = "document of $size bytes exceeds the limit of ${spec.maxDocumentBytes}",
                 )
             }
+            val declared = (op as? PushOperation.Upsert)?.blobs ?: continue
+            val perEntity = config.blobs?.maxBlobsPerEntity
+            if (perEntity != null && declared.size > perEntity) {
+                return RejectError(
+                    code = RejectCode.TOO_LARGE,
+                    entity = op.entity,
+                    id = op.id,
+                    message = "document references ${declared.size} blobs, the limit is $perEntity",
+                )
+            }
         }
-        return null
+        return missingBlobRejection(collectionRowId, group)
+    }
+
+    /**
+     * Refuses a group that points at a blob this collection has never registered.
+     *
+     * Not an ordering check: a blob that is registered and still uploading is accepted, because a
+     * record is allowed to be published ahead of its file. What this refuses is a reference nothing
+     * can ever satisfy — an identifier that was never registered, or one already collected as
+     * garbage, which is what a client meets when its group sat blocked past the retention window.
+     *
+     * It is worth doing on the server even though a correct client cannot produce it: without it, a
+     * second implementation of the client, or a bug in this one, would publish a reference every
+     * device would then fail to fetch for as long as the document lived.
+     */
+    private fun missingBlobRejection(
+        collectionRowId: Uuid,
+        group: PushGroup,
+    ): RejectError? {
+        val declared: Set<BlobId> =
+            group.ops
+                .filterIsInstance<PushOperation.Upsert>()
+                .flatMap { it.blobs.orEmpty() }
+                .toSet()
+        val missing = references.missing(collectionRowId, declared).firstOrNull() ?: return null
+        val offending = group.ops.filterIsInstance<PushOperation.Upsert>().first { missing in it.blobs.orEmpty() }
+        return RejectError(
+            code = RejectCode.BLOB_MISSING,
+            entity = offending.entity,
+            id = offending.id,
+            message = "blob ${missing.value} is not registered in this collection",
+        )
     }
 
     private fun currentEntities(
@@ -233,6 +286,8 @@ internal class GroupApplier(
                 )
         }
 
+        writeReferences(collectionRowId, group, now)
+
         CollectionsTable.update({ CollectionsTable.id eq collectionRowId }) { row ->
             row[nextSeq] = seq + 1
         }
@@ -242,6 +297,38 @@ internal class GroupApplier(
         projections.forEach { it.onBatch(scope, collection, applied) }
 
         return applied.map { AppliedVersion(it.entityType, it.entityId, it.version) }
+    }
+
+    /**
+     * Brings the stored references of everything this batch wrote up to what it declared.
+     *
+     * A deletion clears the entity's references outright: the document is gone and can point at
+     * nothing. An upsert that declared nothing — `blobs` absent, which is what a client that does
+     * not track files sends — is deliberately left alone, because the alternative reads its silence
+     * as "this document references nothing" and collects files that are still in use.
+     */
+    private fun writeReferences(
+        collectionRowId: Uuid,
+        group: PushGroup,
+        now: Instant,
+    ) {
+        val cleared = mutableListOf<EntityKey>()
+        val declared = mutableListOf<BlobReference>()
+        for (op in group.ops) {
+            val key = EntityKey(op.entity, op.id)
+            when (op) {
+                is PushOperation.Delete -> {
+                    cleared += key
+                }
+
+                is PushOperation.Upsert -> {
+                    val blobs = op.blobs ?: continue
+                    cleared += key
+                    declared += blobs.map { BlobReference(key, it) }
+                }
+            }
+        }
+        references.apply(collectionRowId, cleared, declared, now)
     }
 
     private fun writeEntity(
@@ -308,7 +395,7 @@ internal class GroupApplier(
         }
     }
 
-    private fun JsonObject?.orEmpty(): Map<String, kotlinx.serialization.json.JsonElement> = this ?: emptyMap()
+    private fun JsonObject?.orEmpty(): Map<String, JsonElement> = this ?: emptyMap()
 
     private companion object {
         const val OP_UPSERT = "upsert"

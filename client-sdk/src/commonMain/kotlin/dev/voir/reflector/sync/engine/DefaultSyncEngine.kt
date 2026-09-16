@@ -4,10 +4,13 @@ import dev.voir.reflector.sync.core.ConflictThreshold
 import dev.voir.reflector.sync.core.ScopeHandle
 import dev.voir.reflector.sync.core.SyncEngine
 import dev.voir.reflector.sync.core.adapter.CollectionAdapter
+import dev.voir.reflector.sync.core.blob.BlobFetch
+import dev.voir.reflector.sync.core.blob.BlobStore
 import dev.voir.reflector.sync.core.log.SyncLog
 import dev.voir.reflector.sync.core.log.SyncLogEvent
 import dev.voir.reflector.sync.core.log.SyncLogger
 import dev.voir.reflector.sync.core.metrics.SyncMetrics
+import dev.voir.reflector.sync.core.transport.BlobTransport
 import dev.voir.reflector.sync.core.transport.SyncEventChannel
 import dev.voir.reflector.sync.core.transport.SyncTransport
 import dev.voir.reflector.sync.core.trigger.PeriodicTriggerSource
@@ -29,6 +32,20 @@ import kotlin.uuid.Uuid
  * @param transport Connection to the server.
  * @param adapters Bridge to the application's rows, one per synchronised collection. A collection
  *   without an adapter cannot be opened: the library has no other way to read or write its data.
+ * @param blobStore Where the application keeps the bytes of the files its documents point at, or
+ *   `null` when it synchronises none. Providing one is the whole of opting into files: without it
+ *   the adapter is never asked what a document points at, and no blob path in the library is ever
+ *   entered.
+ * @param blobTransport How files reach the server and the storage its tickets point at. Required
+ *   alongside [blobStore]; the bundled [dev.voir.reflector.sync.network.KtorBlobTransport] is what
+ *   an application uses unless it has a stack of its own.
+ * @param blobFetch What this device does about a file a document names but does not declare a
+ *   policy for: [BlobFetch.EAGER] fetches it as soon as the record arrives, [BlobFetch.ON_DEMAND]
+ *   waits for [dev.voir.reflector.sync.core.CollectionHandle.fetch]. The default holds every file a
+ *   document references, which is the behaviour an application that has not thought about it
+ *   expects; an application whose files are large sets it once here and overrides it per reference
+ *   through [dev.voir.reflector.sync.core.blob.BlobRef.fetch] where the choice differs. It says
+ *   nothing about uploads: a file this device created is always sent.
  * @param eventChannel Optional push channel telling the client when there is something to pull.
  *   Without it everything still works, only later — on the client's own triggers.
  * @param triggerSources Reasons to synchronise supplied by the application. The default is a plain
@@ -61,6 +78,9 @@ public fun SyncEngine(
     transport: SyncTransport,
     adapters: Map<CollectionId, CollectionAdapter>,
     coroutineScope: CoroutineScope,
+    blobStore: BlobStore? = null,
+    blobTransport: BlobTransport? = null,
+    blobFetch: BlobFetch = BlobFetch.EAGER,
     eventChannel: SyncEventChannel? = null,
     triggerSources: List<SyncTriggerSource> = listOf(PeriodicTriggerSource()),
     conflictThreshold: ConflictThreshold = ConflictThreshold.Default,
@@ -68,12 +88,25 @@ public fun SyncEngine(
     log: SyncLog = SyncLog.None,
     clock: Clock = Clock.System,
     newUuid: () -> Uuid = { Uuid.random() },
-): SyncEngine =
-    DefaultSyncEngine(
+): SyncEngine {
+    // Both or neither. A file store without a transport is the worse of the two halves and is silent
+    // about it: every record that names a file would wait for a registration nothing can perform, so
+    // a collection would simply stop sending, with nothing conflicted and nothing refused.
+    require((blobStore == null) == (blobTransport == null)) {
+        if (blobStore == null) {
+            "a blob transport was given but no blob store, so nothing would ever be synchronised through it"
+        } else {
+            "a blob store was given but no blob transport, so no record naming a file could ever be sent"
+        }
+    }
+    return DefaultSyncEngine(
         stores = SyncStores(database),
         transactions = transactions,
         transport = transport,
         adapters = adapters,
+        blobStore = blobStore,
+        blobTransport = blobTransport,
+        blobFetch = blobFetch,
         eventChannel = eventChannel,
         triggerSources = triggerSources,
         conflictThreshold = conflictThreshold,
@@ -83,6 +116,7 @@ public fun SyncEngine(
         clock = clock,
         newUuid = newUuid,
     )
+}
 
 /**
  * Engine that keeps one scope active at a time.
@@ -96,6 +130,9 @@ internal class DefaultSyncEngine(
     private val transactions: SyncTransactionRunner,
     private val transport: SyncTransport,
     private val adapters: Map<CollectionId, CollectionAdapter>,
+    private val blobStore: BlobStore?,
+    private val blobTransport: BlobTransport?,
+    private val blobFetch: BlobFetch,
     private val eventChannel: SyncEventChannel?,
     private val triggerSources: List<SyncTriggerSource>,
     private val conflictThreshold: ConflictThreshold,
@@ -120,6 +157,11 @@ internal class DefaultSyncEngine(
                 mapOf(
                     "collections" to adapters.keys.joinToString { it.value },
                     "eventChannel" to (eventChannel != null).toString(),
+                    "blobs" to (blobStore != null).toString(),
+                    // Reported whether or not files are synchronised at all: "why has this device
+                    // downloaded nothing" is a question with two very different answers, and the
+                    // configured policy is the one a reader cannot otherwise infer from any line.
+                    "blobFetch" to blobFetch.name,
                     "triggerSources" to triggerSources.size.toString(),
                     "conflictThreshold" to conflictThreshold.value.toString(),
                 )
@@ -141,6 +183,9 @@ internal class DefaultSyncEngine(
             transactions = transactions,
             transport = transport,
             adapters = adapters,
+            blobStore = blobStore,
+            blobTransport = blobTransport,
+            blobFetch = blobFetch,
             eventChannel = eventChannel,
             triggerSources = triggerSources,
             conflictThreshold = conflictThreshold,

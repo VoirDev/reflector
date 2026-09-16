@@ -6,7 +6,6 @@ import dev.voir.reflector.sync.core.CollectionSyncState
 import dev.voir.reflector.sync.core.SyncPhase
 import dev.voir.reflector.sync.core.transport.SyncTransport
 import dev.voir.reflector.sync.protocol.BatchSeq
-import dev.voir.reflector.sync.protocol.ClientId
 import dev.voir.reflector.sync.protocol.CollectionEpoch
 import dev.voir.reflector.sync.protocol.CollectionId
 import dev.voir.reflector.sync.protocol.Cursor
@@ -32,6 +31,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import kotlin.test.AfterTest
@@ -39,7 +39,6 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
 import kotlin.test.assertNotNull
-import kotlin.test.assertNull
 import kotlin.uuid.Uuid
 
 /**
@@ -93,6 +92,11 @@ class LedgerSyncTest {
                 buildJsonObject {
                     put("title", "Cash")
                     put("currency", "EUR")
+                    // Written out rather than omitted, and that is the protocol rather than the
+                    // serialiser being noisy: the server merges an upsert by the keys present, so a
+                    // missing field keeps what is stored and an explicit null clears it. A wallet
+                    // whose photograph was detached says so by sending this null.
+                    put("photoBlobId", JsonNull)
                 },
                 operation.data,
             )

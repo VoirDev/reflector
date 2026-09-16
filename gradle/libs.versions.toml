@@ -17,7 +17,10 @@ androidTargetSdk = "36"
 
 coroutines = "1.11.0"
 serializationJson = "1.11.0"
-datetime = "0.8.0"
+# Streams for the blob ports. Ktor 3.5.2 already resolves this version transitively; it is
+# declared because RawSource appears in the client SDK's public API and a transitive dependency
+# is not a contract.
+kotlinxIo = "0.9.1"
 ktor = "3.5.2"
 room = "3.0.2"
 sqlite = "2.7.0"
@@ -46,7 +49,7 @@ kotlinx-coroutines-core = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-c
 kotlinx-coroutines-android = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-android", version.ref = "coroutines" }
 kotlinx-coroutines-test = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-test", version.ref = "coroutines" }
 kotlinx-serialization-json = { module = "org.jetbrains.kotlinx:kotlinx-serialization-json", version.ref = "serializationJson" }
-kotlinx-datetime = { module = "org.jetbrains.kotlinx:kotlinx-datetime", version.ref = "datetime" }
+kotlinx-io-core = { module = "org.jetbrains.kotlinx:kotlinx-io-core", version.ref = "kotlinxIo" }
 
 ktor-client-core = { module = "io.ktor:ktor-client-core", version.ref = "ktor" }
 ktor-client-cio = { module = "io.ktor:ktor-client-cio", version.ref = "ktor" }
@@ -69,8 +72,6 @@ room-compiler = { module = "androidx.room3:room3-compiler", version.ref = "room"
 sqlite-bundled = { module = "androidx.sqlite:sqlite-bundled", version.ref = "sqlite" }
 
 koin-core = { module = "io.insert-koin:koin-core", version.ref = "koin" }
-koin-android = { module = "io.insert-koin:koin-android", version.ref = "koin" }
-koin-test = { module = "io.insert-koin:koin-test", version.ref = "koin" }
 
 # The Android sample runs the background trigger the guide describes; nothing in the SDK needs it.
 androidx-work-runtime = { module = "androidx.work:work-runtime-ktx", version.ref = "androidxWork" }

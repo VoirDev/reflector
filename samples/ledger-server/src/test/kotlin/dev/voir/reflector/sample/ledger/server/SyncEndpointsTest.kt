@@ -14,7 +14,6 @@ import dev.voir.reflector.sync.protocol.push.PushGroup
 import dev.voir.reflector.sync.protocol.push.PushGroupResult
 import dev.voir.reflector.sync.protocol.push.PushOperation
 import dev.voir.reflector.sync.protocol.push.PushRequest
-import io.ktor.client.HttpClient
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.client.request.get
 import io.ktor.client.request.header

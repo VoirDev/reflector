@@ -1,6 +1,7 @@
 package dev.voir.reflector.sample.ledger.server
 
 import dev.voir.reflector.sync.protocol.BatchSeq
+import dev.voir.reflector.sync.protocol.BlobId
 import dev.voir.reflector.sync.protocol.CollectionId
 import dev.voir.reflector.sync.protocol.ScopeId
 import dev.voir.reflector.sync.protocol.events.SyncEvent
@@ -21,6 +22,7 @@ import kotlinx.coroutines.flow.merge
 class ScopeEvents {
     private val committed = MutableSharedFlow<Committed>(extraBufferCapacity = BUFFER)
     private val revoked = MutableSharedFlow<ScopeId>(extraBufferCapacity = BUFFER)
+    private val filesReady = MutableSharedFlow<FileReady>(extraBufferCapacity = BUFFER)
 
     /**
      * Publishes a committed batch.
@@ -39,6 +41,28 @@ class ScopeEvents {
         seq: BatchSeq,
     ) {
         committed.tryEmit(Committed(scope, collection, seq))
+    }
+
+    /**
+     * Announces that a file's bytes can now be fetched.
+     *
+     * The other half of what makes publishing a record ahead of its file bearable. The record
+     * reached the other devices immediately and nothing about the log has changed since, so a pull
+     * would not discover that the bytes have landed — without this they would find out whenever
+     * their own backoff next happened to fire, which is minutes of a photograph sitting ready.
+     *
+     * Losing one costs latency and nothing else, exactly like an invalidation.
+     *
+     * @param scope Scope the collection belongs to.
+     * @param collection Collection the file belongs to.
+     * @param blobId File that became usable.
+     */
+    fun publishBlobReady(
+        scope: ScopeId,
+        collection: CollectionId,
+        blobId: BlobId,
+    ) {
+        filesReady.tryEmit(FileReady(scope, collection, blobId))
     }
 
     /**
@@ -72,7 +96,16 @@ class ScopeEvents {
             revoked
                 .filter { it == scope }
                 .map { SyncEvent.Revoked },
+            filesReady
+                .filter { it.scope == scope }
+                .map { SyncEvent.BlobReady(it.collection, it.blobId) },
         )
+
+    private data class FileReady(
+        val scope: ScopeId,
+        val collection: CollectionId,
+        val blobId: BlobId,
+    )
 
     private data class Committed(
         val scope: ScopeId,

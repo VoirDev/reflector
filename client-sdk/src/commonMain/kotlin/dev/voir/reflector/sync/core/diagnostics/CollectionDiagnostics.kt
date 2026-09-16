@@ -2,6 +2,7 @@ package dev.voir.reflector.sync.core.diagnostics
 
 import dev.voir.reflector.sync.core.SyncPhase
 import dev.voir.reflector.sync.core.adapter.SchemaFingerprint
+import dev.voir.reflector.sync.core.blob.BlobTransferState
 import dev.voir.reflector.sync.persistence.group.PushGroupState
 import dev.voir.reflector.sync.protocol.CollectionId
 import dev.voir.reflector.sync.protocol.Cursor
@@ -52,6 +53,10 @@ import kotlin.time.Instant
  * @property lastPushAt When a push was last applied, or `null` when none has been.
  * @property queue Groups waiting to be sent, oldest first. The head is the one that matters: its
  *   state is what decides whether the collection is draining, waiting or stopped.
+ * @property files Files the library is tracking, whichever way they are moving. Empty for an
+ *   application that synchronises none. Unlike [queue] this is not an ordering and its first entry
+ *   explains nothing — what is worth reading is the entries whose attempts are climbing, and the
+ *   ones nothing references any more.
  */
 public data class CollectionDiagnostics(
     public val scope: ScopeId,
@@ -68,7 +73,23 @@ public data class CollectionDiagnostics(
     public val lastPullAt: Instant?,
     public val lastPushAt: Instant?,
     public val queue: List<QueuedGroupDiagnostics>,
+    public val files: List<QueuedBlobDiagnostics> = emptyList(),
 ) {
+    /**
+     * Whether the queue is waiting on bytes rather than on anything anybody can decide.
+     *
+     * A collection can be perfectly healthy, with nothing conflicted and nothing refused, and still
+     * send nothing at all — because its oldest group holds a record that cannot be published before
+     * its file, and the file is still moving. That is working as intended and is invisible in every
+     * other value here, which is what makes it worth asking about: without it the only honest
+     * description of such a collection is that it is stuck for no reason.
+     */
+    public val isQueueWaitingOnFiles: Boolean
+        get() =
+            !isQueueBlocked &&
+                queue.isNotEmpty() &&
+                files.any { it.state == BlobTransferState.LOCAL || it.state == BlobTransferState.UPLOADING }
+
     /**
      * Whether the queue has stopped in a way only the application can clear.
      *

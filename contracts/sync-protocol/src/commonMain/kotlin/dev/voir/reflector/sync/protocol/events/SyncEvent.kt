@@ -3,6 +3,7 @@
 package dev.voir.reflector.sync.protocol.events
 
 import dev.voir.reflector.sync.protocol.BatchSeq
+import dev.voir.reflector.sync.protocol.BlobId
 import dev.voir.reflector.sync.protocol.CollectionId
 import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.KSerializer
@@ -56,6 +57,28 @@ public sealed class SyncEvent {
     ) : SyncEvent()
 
     /**
+     * A blob has become usable and can now be fetched.
+     *
+     * Sent when bytes a client may already be waiting for have landed in the host's storage. It is
+     * an alarm clock like the rest of this channel and carries no data: the device answers it by
+     * asking for that blob again over HTTP.
+     *
+     * It exists because of the ordinary case where a record is published ahead of its file. The
+     * document naming the blob reaches the other devices immediately; without this they would
+     * discover the bytes whenever their own backoff next happened to fire, which is minutes of a
+     * photograph sitting ready in a bucket. A client that misses the event still gets there, which
+     * is why the event may be lost like every other one here.
+     *
+     * @property collection Collection the blob belongs to.
+     * @property blobId Blob that became usable.
+     */
+    @Serializable
+    public data class BlobReady(
+        public val collection: CollectionId,
+        public val blobId: BlobId,
+    ) : SyncEvent()
+
+    /**
      * Access to the scope has been revoked.
      *
      * The client stops its workers and wipes the scope's data; pending local changes are lost by
@@ -91,6 +114,7 @@ public object SyncEventSerializer : KSerializer<SyncEvent> {
     private const val TYPE_INVALIDATE = "invalidate"
     private const val TYPE_RESYNC = "resync"
     private const val TYPE_REVOKED = "revoked"
+    private const val TYPE_BLOB_READY = "blobReady"
 
     override val descriptor: SerialDescriptor = buildClassSerialDescriptor("SyncEvent")
 
@@ -106,6 +130,7 @@ public object SyncEventSerializer : KSerializer<SyncEvent> {
         return when (val type = element[FIELD_TYPE]?.jsonPrimitive?.contentOrNull) {
             TYPE_INVALIDATE -> input.json.decodeFromJsonElement(SyncEvent.Invalidate.serializer(), element)
             TYPE_RESYNC -> input.json.decodeFromJsonElement(SyncEvent.Resync.serializer(), element)
+            TYPE_BLOB_READY -> input.json.decodeFromJsonElement(SyncEvent.BlobReady.serializer(), element)
             TYPE_REVOKED -> SyncEvent.Revoked
             else -> SyncEvent.Unknown(type = type.orEmpty(), raw = element)
         }
@@ -130,6 +155,10 @@ public object SyncEventSerializer : KSerializer<SyncEvent> {
 
                 is SyncEvent.Resync -> {
                     output.json.encodeToJsonElement(SyncEvent.Resync.serializer(), value).withType(TYPE_RESYNC)
+                }
+
+                is SyncEvent.BlobReady -> {
+                    output.json.encodeToJsonElement(SyncEvent.BlobReady.serializer(), value).withType(TYPE_BLOB_READY)
                 }
 
                 SyncEvent.Revoked -> {

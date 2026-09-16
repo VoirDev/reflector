@@ -1,5 +1,7 @@
 package dev.voir.reflector.sync.persistence
 
+import dev.voir.reflector.sync.persistence.blob.BlobRecordStore
+import dev.voir.reflector.sync.persistence.blob.BlobRefStore
 import dev.voir.reflector.sync.persistence.collection.CollectionStore
 import dev.voir.reflector.sync.persistence.conflict.ConflictStore
 import dev.voir.reflector.sync.persistence.group.GroupStore
@@ -21,6 +23,8 @@ import dev.voir.reflector.sync.persistence.record.RecordStore
  * @property conflicts Conflicts waiting for a decision.
  * @property inbox Downloaded batches waiting to be applied.
  * @property meta Per-scope identity of this installation.
+ * @property blobs Synchronisation metadata of files.
+ * @property blobRefs What the application's documents point at.
  */
 internal class SyncStores(
     database: SyncDatabase,
@@ -31,4 +35,6 @@ internal class SyncStores(
     public val conflicts: ConflictStore = ConflictStore(database.syncConflictDao())
     public val inbox: InboxStore = InboxStore(database.syncInboxDao())
     public val meta: MetaStore = MetaStore(database.syncMetaDao())
+    public val blobs: BlobRecordStore = BlobRecordStore(database.syncBlobDao())
+    public val blobRefs: BlobRefStore = BlobRefStore(database.syncBlobRefDao())
 }

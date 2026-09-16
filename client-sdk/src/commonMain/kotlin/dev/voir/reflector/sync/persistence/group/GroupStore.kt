@@ -139,15 +139,6 @@ internal class GroupStore(
     }
 
     /**
-     * Counts one more merge caused by a dependency refusal.
-     *
-     * @param groupId Group that was merged.
-     */
-    public suspend fun countDependencyMerge(groupId: GroupId) {
-        dao.incrementDependencyMerges(groupId.value)
-    }
-
-    /**
      * Sets how many dependency merges a group has behind it.
      *
      * @param groupId Group to change.

@@ -10,6 +10,7 @@ import androidx.room3.Room
 import androidx.sqlite.driver.bundled.BundledSQLiteDriver
 import dev.voir.reflector.sample.ledger.LEDGER
 import dev.voir.reflector.sample.ledger.LedgerDatabase
+import dev.voir.reflector.sample.ledger.LedgerFiles
 import dev.voir.reflector.sample.ledger.ledgerSync
 import dev.voir.reflector.sync.core.CollectionHandle
 import dev.voir.reflector.sync.core.TokenProvider
@@ -18,6 +19,7 @@ import dev.voir.reflector.sync.core.log.SyncLog
 import dev.voir.reflector.sync.core.trigger.ManualTriggerSource
 import dev.voir.reflector.sync.core.trigger.PeriodicTriggerSource
 import dev.voir.reflector.sync.core.trigger.SyncTrigger
+import dev.voir.reflector.sync.network.KtorBlobTransport
 import dev.voir.reflector.sync.network.KtorSyncTransport
 import dev.voir.reflector.sync.network.SyncHttpTracing
 import dev.voir.reflector.sync.network.syncHttpClient
@@ -26,6 +28,8 @@ import io.ktor.client.engine.okhttp.OkHttp
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.io.files.Path
+import java.io.File
 
 /**
  * Everything the application owns for synchronisation, assembled once for the process.
@@ -75,21 +79,27 @@ class LedgerApplication : Application() {
                 .setQueryCoroutineContext(Dispatchers.IO)
                 .build()
 
-        val transport =
-            KtorSyncTransport(
-                client = syncHttpClient(OkHttp.create(), log, SyncHttpTracing.BASIC),
-                baseUrl = HOST,
-                tokens =
-                    object : TokenProvider {
-                        // A real application asks its session layer. This host accepts the scope
-                        // identifier as the token, which is what makes it a reference and not a
-                        // model of anybody's authentication.
-                        override suspend fun token(): String = scopeId.value
+        // One client for both transports. The blob transport uses it for the three file endpoints,
+        // which carry credentials like any other route, and builds the requests to the host's
+        // storage itself — those go to a presigned URL and must carry none.
+        val httpClient = syncHttpClient(OkHttp.create(), log, SyncHttpTracing.BASIC)
+        val tokens =
+            object : TokenProvider {
+                // A real application asks its session layer. This host accepts the scope
+                // identifier as the token, which is what makes it a reference and not a
+                // model of anybody's authentication.
+                override suspend fun token(): String = scopeId.value
 
-                        override suspend fun refresh(): Boolean = false
-                    },
-                log = log,
-            )
+                override suspend fun refresh(): Boolean = false
+            }
+
+        val transport = KtorSyncTransport(httpClient, baseUrl = HOST, tokens = tokens, log = log)
+
+        // Where the bytes of attached photographs live: the application's own private storage, which
+        // the library never learns the location of. Under `filesDir` rather than the cache, because
+        // a file the system may delete underneath a document that still names it is exactly the
+        // failure the library then has to report to the user.
+        val files = LedgerFiles(Path(File(filesDir, "ledger-blobs").absolutePath))
 
         collection =
             ledgerSync(
@@ -98,6 +108,8 @@ class LedgerApplication : Application() {
                 coroutineScope = workers,
                 triggerSources = listOf(triggers, PeriodicTriggerSource()),
                 log = log,
+                files = files,
+                blobTransport = KtorBlobTransport(httpClient, baseUrl = HOST, tokens = tokens, log = log),
             ).scope(scopeId)
                 .collection(LEDGER)
 

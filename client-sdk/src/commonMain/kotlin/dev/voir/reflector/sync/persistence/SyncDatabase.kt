@@ -1,5 +1,7 @@
 package dev.voir.reflector.sync.persistence
 
+import dev.voir.reflector.sync.persistence.blob.SyncBlobDao
+import dev.voir.reflector.sync.persistence.blob.SyncBlobRefDao
 import dev.voir.reflector.sync.persistence.collection.SyncCollectionDao
 import dev.voir.reflector.sync.persistence.conflict.SyncConflictDao
 import dev.voir.reflector.sync.persistence.group.SyncGroupDao
@@ -31,6 +33,8 @@ import dev.voir.reflector.sync.persistence.record.SyncRecordDao
  *         SyncInboxBatchEntity::class,
  *         SyncInboxOpEntity::class,
  *         SyncMetaEntity::class,
+ *         SyncBlobEntity::class,
+ *         SyncBlobRefEntity::class,
  *     ],
  *     version = 1,
  * )
@@ -60,4 +64,17 @@ public interface SyncDatabase {
 
     /** Returns access to the per-scope identity of this installation. */
     public fun syncMetaDao(): SyncMetaDao
+
+    /**
+     * Returns access to the synchronisation metadata of files.
+     *
+     * Declared whether or not the application synchronises files. The tables are part of the
+     * library's schema, and an application that implements no
+     * [dev.voir.reflector.sync.core.blob.BlobStore] simply leaves them empty — which costs two empty
+     * tables and saves every consumer a second `@Database` shape to choose between.
+     */
+    public fun syncBlobDao(): SyncBlobDao
+
+    /** Returns access to what the application's documents point at. */
+    public fun syncBlobRefDao(): SyncBlobRefDao
 }

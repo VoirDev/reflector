@@ -5,6 +5,8 @@ import androidx.room3.Room
 import androidx.room3.RoomDatabase
 import androidx.sqlite.driver.bundled.BundledSQLiteDriver
 import dev.voir.reflector.sync.persistence.SyncDatabase
+import dev.voir.reflector.sync.persistence.blob.SyncBlobEntity
+import dev.voir.reflector.sync.persistence.blob.SyncBlobRefEntity
 import dev.voir.reflector.sync.persistence.collection.SyncCollectionEntity
 import dev.voir.reflector.sync.persistence.conflict.SyncConflictEntity
 import dev.voir.reflector.sync.persistence.group.SyncGroupEntity
@@ -31,6 +33,8 @@ import kotlinx.coroutines.Dispatchers
         SyncInboxBatchEntity::class,
         SyncInboxOpEntity::class,
         SyncMetaEntity::class,
+        SyncBlobEntity::class,
+        SyncBlobRefEntity::class,
     ],
     version = 1,
     exportSchema = false,

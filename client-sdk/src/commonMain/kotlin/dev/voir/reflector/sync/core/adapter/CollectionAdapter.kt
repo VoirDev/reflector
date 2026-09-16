@@ -1,5 +1,6 @@
 package dev.voir.reflector.sync.core.adapter
 
+import dev.voir.reflector.sync.core.blob.BlobRef
 import dev.voir.reflector.sync.core.conflict.Conflict
 import dev.voir.reflector.sync.core.conflict.Resolution
 import dev.voir.reflector.sync.protocol.EntityId
@@ -41,6 +42,37 @@ public interface CollectionAdapter {
      */
     public val schema: SchemaFingerprint?
         get() = null
+
+    /**
+     * Returns every file the entity's document points at.
+     *
+     * The whole coupling between the application's data and file synchronisation. The library never
+     * reads a document — which field of one names a file is knowledge only the application's schema
+     * has — so everything it does about files follows from this answer.
+     *
+     * Called at two moments, both inside the library's transaction: when a document has just been
+     * materialised for a push, and when one has just arrived and been applied. In both the answer
+     * **replaces** what was stored for that entity, which is what makes references state-based like
+     * the rest of the protocol. So it has to be the whole set every time: a document that still names
+     * a file must still name it here, or the file becomes garbage while it is in use.
+     *
+     * The default answers that nothing is referenced, which is what an application with no files
+     * means and what one that has not been told about this method would have meant anyway. A
+     * `null`-vs-empty distinction is not needed here and does not exist: the library knows whether
+     * the application implements files at all from whether it was given a
+     * [dev.voir.reflector.sync.core.blob.BlobStore], and an adapter is asked this only when it was.
+     *
+     * @param entityType Type of the entity whose document to read.
+     * @param id Identifier of the entity whose document to read.
+     * @param document Document as it stands, which is what was just sent or just applied.
+     * @return Every file the document points at, and whether the record may be published ahead of
+     *   each. An empty set means the document references none.
+     */
+    public fun blobs(
+        entityType: EntityType,
+        id: EntityId,
+        document: JsonObject,
+    ): Set<BlobRef> = emptySet()
 
     /**
      * Returns the current state of an entity for sending to the server.

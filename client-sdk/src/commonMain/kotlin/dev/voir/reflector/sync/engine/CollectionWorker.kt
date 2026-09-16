@@ -5,14 +5,21 @@ import dev.voir.reflector.sync.core.SyncFailure
 import dev.voir.reflector.sync.core.SyncPhase
 import dev.voir.reflector.sync.core.adapter.CollectionAdapter
 import dev.voir.reflector.sync.core.adapter.SchemaFingerprint
+import dev.voir.reflector.sync.core.blob.BlobFetch
+import dev.voir.reflector.sync.core.blob.BlobStore
+import dev.voir.reflector.sync.core.blob.BlobTransferState
 import dev.voir.reflector.sync.core.conflict.ConflictId
 import dev.voir.reflector.sync.core.log.SyncLogEvent
 import dev.voir.reflector.sync.core.log.SyncLogger
 import dev.voir.reflector.sync.core.metrics.SyncMetricEvent
 import dev.voir.reflector.sync.core.metrics.SyncMetrics
 import dev.voir.reflector.sync.core.metrics.emit
+import dev.voir.reflector.sync.core.transport.BlobTransport
 import dev.voir.reflector.sync.core.transport.SyncTransport
 import dev.voir.reflector.sync.core.transport.SyncTransportFailure
+import dev.voir.reflector.sync.engine.blob.BlobReconciler
+import dev.voir.reflector.sync.engine.blob.BlobReferences
+import dev.voir.reflector.sync.engine.blob.BlobWorker
 import dev.voir.reflector.sync.engine.bootstrap.BootstrapCoordinator
 import dev.voir.reflector.sync.engine.bootstrap.BootstrapOutcome
 import dev.voir.reflector.sync.engine.conflict.ConflictCoordinator
@@ -24,6 +31,7 @@ import dev.voir.reflector.sync.engine.retry.BackoffPolicy
 import dev.voir.reflector.sync.persistence.SyncStores
 import dev.voir.reflector.sync.persistence.SyncTransactionRunner
 import dev.voir.reflector.sync.persistence.group.PushGroupState
+import dev.voir.reflector.sync.protocol.BlobId
 import dev.voir.reflector.sync.protocol.ClientId
 import dev.voir.reflector.sync.protocol.CollectionId
 import dev.voir.reflector.sync.protocol.ScopeId
@@ -60,6 +68,13 @@ import kotlin.uuid.Uuid
  * @param coroutineScope Scope the worker's loop runs in; cancelling it stops the worker.
  * @param clock Source of local time, used for backoff and diagnostics only.
  * @param newUuid Source of identifiers; injected so that tests can make them predictable.
+ * @param blobStore Application's own file store, or `null` when it synchronises no files. Its
+ *   presence is the whole of opting in: without one the adapter is never asked what a document
+ *   points at and no blob path in the library is entered.
+ * @param blobTransport Connection to the server's file endpoints and to the storage its tickets
+ *   point at. Required when [blobStore] is given, and unused otherwise.
+ * @param blobFetch Policy for a reference that declares none of its own: whether this device
+ *   fetches the file as soon as a document names it, or waits to be asked.
  */
 internal class CollectionWorker(
     private val scope: ScopeId,
@@ -74,13 +89,31 @@ internal class CollectionWorker(
     private val coroutineScope: CoroutineScope,
     private val clock: Clock,
     private val newUuid: () -> Uuid = { Uuid.random() },
+    private val blobStore: BlobStore? = null,
+    private val blobTransport: BlobTransport? = null,
+    private val blobFetch: BlobFetch = BlobFetch.EAGER,
 ) {
     /** Failure of the most recent attempt, kept in memory: a failure from a past process is history. */
     val lastFailure: MutableStateFlow<SyncFailure?> = MutableStateFlow(null)
 
     private val requests = Channel<Unit>(Channel.CONFLATED)
     private val declined = mutableSetOf<ConflictId>()
-    private val conflicts = ConflictCoordinator(scope, collection, stores, transactions, adapter, log, newUuid)
+    private val references = blobStore?.let { BlobReferences(scope, collection, stores, adapter, blobFetch) }
+    private val reconciler =
+        blobStore?.let { BlobReconciler(scope, collection, stores, transactions, it, log) }
+
+    /**
+     * Moves the bytes, on a coroutine of its own.
+     *
+     * Built on the first cycle rather than at construction, because it needs the limits the server
+     * publishes and those are not known until something has asked for them.
+     */
+    private var blobWorker: BlobWorker? = null
+
+    /** Whether the server has said it serves no files, so that it is complained about only once. */
+    private var blobsUnsupported = false
+    private val conflicts =
+        ConflictCoordinator(scope, collection, stores, transactions, adapter, log, newUuid, references)
 
     private var limits: SyncLimits? = null
     private var clientId: ClientId? = null
@@ -110,6 +143,21 @@ internal class CollectionWorker(
                         lastFailure.value =
                             SyncFailure.Local(failure.message ?: "the application's code threw", failure)
                     }
+                // Outside the cycle rather than at the end of it, and deliberately: what this decides
+                // is derived from the reference rows, not from what the cycle managed to achieve, and
+                // a cycle stops early for half a dozen ordinary reasons. A push that was refused is
+                // exactly the moment at which a file the same cycle just referenced still has to be
+                // looked into — leaving that until the next trigger would strand it for a timer.
+                runCatching { reconciler?.reconcile() }
+                    .onFailure { failure ->
+                        log.error(SyncLogEvent.BLOB_RELEASE_FAILED, failure) {
+                            "reconciling files threw; what it had already decided stands and the rest is retried"
+                        }
+                    }
+                // Whatever reconciliation decided is work for the file worker, so it is woken here
+                // rather than left for a timer: a photograph adopted a moment ago is one somebody is
+                // very likely looking at an empty frame for.
+                blobWorker?.requestTransfers()
             }
         }
     }
@@ -141,6 +189,7 @@ internal class CollectionWorker(
                 { failure -> lastFailure.value = failure },
                 clock,
                 newUuid,
+                references,
             )
         val pull =
             PullCoordinator(
@@ -156,6 +205,7 @@ internal class CollectionWorker(
                 log,
                 clock,
                 newUuid,
+                references,
             )
         val bootstrap =
             BootstrapCoordinator(
@@ -170,8 +220,10 @@ internal class CollectionWorker(
                 log,
                 clock,
                 newUuid,
+                references,
             )
 
+        startBlobWorker(limits)
         reconcileSchema()
         if (needsBootstrap() && !bootstrap(bootstrap)) {
             return
@@ -207,9 +259,37 @@ internal class CollectionWorker(
                     pending = stores.records.pendingCount(scope, collection),
                     open = stores.conflicts.openIds(scope, collection).size,
                     headState = stores.groups.head(scope, collection)?.state,
+                    outgoingFiles =
+                        stores.blobs
+                            .waiting(
+                                scope,
+                                collection,
+                                BlobTransferState.LOCAL,
+                                Long.MAX_VALUE,
+                                COUNT_LIMIT,
+                            ).size,
+                    incomingFiles =
+                        stores.blobs
+                            .waiting(
+                                scope,
+                                collection,
+                                BlobTransferState.REMOTE,
+                                Long.MAX_VALUE,
+                                COUNT_LIMIT,
+                            ).size,
                 )
             }
-        metrics.emit(SyncMetricEvent.QueueObserved(scope, collection, summary.pending, summary.open), log)
+        metrics.emit(
+            SyncMetricEvent.QueueObserved(
+                scope = scope,
+                collection = collection,
+                pendingCount = summary.pending,
+                conflictCount = summary.open,
+                pendingBlobs = summary.outgoingFiles,
+                incomingBlobs = summary.incomingFiles,
+            ),
+            log,
+        )
         reportBlockedQueue(summary)
         log.debug(
             SyncLogEvent.CYCLE_FINISHED,
@@ -262,6 +342,84 @@ internal class CollectionWorker(
             }
         }
         queueWasBlocked = blocked
+    }
+
+    /**
+     * Starts the file worker once, as soon as the server's limits are known.
+     *
+     * A file larger than the server accepts has to be refused before a byte of it moves, which is
+     * the whole reason the limit is published — so the worker cannot exist before this client has
+     * been told what it is.
+     *
+     * A server that serves no files at all is a misconfiguration and is reported as one, loudly and
+     * once. It does **not** stop the collection: documents have nothing to do with files, and taking
+     * synchronisation down entirely because photographs cannot be transferred would turn a partial
+     * outage into a total one. What it does mean is that records naming a file are held back, since
+     * a server that has never heard of one refuses the document that names it.
+     *
+     * @param limits Limits the server published.
+     */
+    private fun startBlobWorker(limits: SyncLimits) {
+        if (blobWorker != null || blobsUnsupported) {
+            return
+        }
+        val store = blobStore ?: return
+        val transport = blobTransport ?: return
+        val blobLimits = limits.blobs
+        if (blobLimits == null) {
+            blobsUnsupported = true
+            log.error(SyncLogEvent.BLOB_UNAVAILABLE) {
+                "this application synchronises files and the server it is talking to serves none; " +
+                    "documents continue to synchronise and records naming a file will not be sent"
+            }
+            return
+        }
+        blobWorker =
+            BlobWorker(
+                scope = scope,
+                collection = collection,
+                stores = stores,
+                transactions = transactions,
+                transport = transport,
+                blobStore = store,
+                limits = blobLimits,
+                metrics = metrics,
+                log = log,
+                coroutineScope = coroutineScope,
+                clock = clock,
+                // A group held back by a file — waiting for it to be registered, or for its bytes —
+                // has no other way of learning that it may now go.
+                onProgressed = ::requestSync,
+            ).also { it.start() }
+    }
+
+    /** Asks the file worker to move what it can, if this collection synchronises files at all. */
+    fun requestTransfers() {
+        blobWorker?.requestTransfers()
+    }
+
+    /**
+     * Records that the application wants a file's bytes here, and wakes the worker.
+     *
+     * Applied outside the cycle rather than by requesting one, because there is nothing for a cycle
+     * to do about it: no document changed, nothing has to be pushed or pulled, and the only party
+     * with work is the file worker. A collection that synchronises no files ignores the request.
+     *
+     * @param blobId File the application wants.
+     */
+    suspend fun fetchBlob(blobId: BlobId) {
+        val reconciler = reconciler ?: return
+        reconciler.request(blobId)
+        blobWorker?.requestTransfers()
+    }
+
+    /**
+     * Gives up a file's bytes on this device, leaving the file on the server.
+     *
+     * @param blobId File to give up.
+     */
+    suspend fun evictBlob(blobId: BlobId) {
+        reconciler?.evict(blobId)
     }
 
     /**
@@ -346,7 +504,6 @@ internal class CollectionWorker(
         while (true) {
             when (val outcome = push.pushOnce()) {
                 PushOutcome.Applied -> {
-                    Unit
                 }
 
                 PushOutcome.Idle -> {
@@ -404,6 +561,10 @@ internal class CollectionWorker(
      * @param coordinator Bootstrap to rebuild the collection with once it has been emptied.
      */
     private suspend fun resetToServer(coordinator: BootstrapCoordinator) {
+        // Before the rows go, because afterwards there is nothing left to say which files belonged
+        // to this collection. Not eviction but the same act as wiping the rest: what these files
+        // belonged to no longer exists.
+        reconciler?.erase()
         val abandoned =
             transactions.transaction {
                 val pending = stores.records.pendingCount(scope, collection)
@@ -520,6 +681,17 @@ internal class CollectionWorker(
                     SyncFailure.Revoked(failure.describe())
                 }
 
+                // Files fail on their own path and are reported to the application through its own
+                // file store, with a reason it can act on. Reaching here at all means a blob request
+                // failed outside a transfer, which is a collection-level fault like any other.
+                is SyncTransportFailure.BlobGone -> {
+                    SyncFailure.Server(NOT_FOUND, failure.describe())
+                }
+
+                is SyncTransportFailure.BlobRefused -> {
+                    SyncFailure.Server(CONFLICT, failure.describe())
+                }
+
                 // Reported as the status it arrived as. The application does nothing about it — the
                 // library bootstraps on its own — so it needs a case of its own even less than it
                 // needs a fictitious status code.
@@ -558,20 +730,33 @@ internal class CollectionWorker(
      * @property pending Local changes that have not reached the server.
      * @property open Conflicts waiting for the application to decide.
      * @property headState State of the oldest group in the queue, or `null` when the queue is empty.
+     * @property outgoingFiles Files waiting to be sent, counted up to a ceiling: this is a gauge for
+     *   a dashboard, and a device with a hundred thousand of them needs a number, not all of them.
+     * @property incomingFiles Files waiting to be fetched, counted the same way.
      */
     private data class CycleSummary(
         val pending: Int,
         val open: Int,
         val headState: PushGroupState?,
+        val outgoingFiles: Int = 0,
+        val incomingFiles: Int = 0,
     )
 
     private companion object {
         const val TOO_MANY_REQUESTS = 429
 
+        /** Ceiling on the file gauge: past this the exact number stops telling anybody anything. */
+        const val COUNT_LIMIT = 1000
+
         /** What the server answers for a cursor it no longer keeps history for. */
         const val GONE = 410
 
-        /** Status a host answers when the collection a client refers to has been purged. */
+        /** What the server answers for a file it does not have. */
+        const val NOT_FOUND = 404
+
+        /** Status a host answers when the collection a client refers to has been purged, and also
+         * what it answers when it refuses something about a file. The two are told apart by which
+         * path they arrived on, not by the number. */
         const val CONFLICT = 409
     }
 }

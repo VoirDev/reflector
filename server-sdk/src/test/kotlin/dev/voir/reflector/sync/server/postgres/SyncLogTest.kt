@@ -1,7 +1,6 @@
 package dev.voir.reflector.sync.server.postgres
 
 import dev.voir.reflector.sync.protocol.ClientId
-import dev.voir.reflector.sync.protocol.Cursor
 import dev.voir.reflector.sync.protocol.EntityId
 import dev.voir.reflector.sync.protocol.GroupId
 import dev.voir.reflector.sync.protocol.PageToken

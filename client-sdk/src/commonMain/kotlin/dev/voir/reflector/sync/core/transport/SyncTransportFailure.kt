@@ -89,6 +89,37 @@ public sealed class SyncTransportFailure(
     ) : SyncTransportFailure(message)
 
     /**
+     * The server has no such file.
+     *
+     * A blob path only. It means the file was collected as garbage while this device was away, or
+     * went with a collection that was erased — and either way a device that never fetched the bytes
+     * cannot produce them, so it is the application's to decide about rather than a transfer to
+     * retry.
+     *
+     * It exists as a case of its own because the status it arrives as, `404`, means something quite
+     * different on the other paths, and the shared mapping cannot tell them apart.
+     *
+     * @property message Description reported by the server.
+     */
+    public class BlobGone(
+        message: String,
+    ) : SyncTransportFailure(message)
+
+    /**
+     * The server refused something about a file rather than about the request.
+     *
+     * A blob path only: an identifier already naming different bytes, or a claim that an upload
+     * finished which the storage did not bear out. Both arrive as `409`, which on every other path
+     * of this protocol means a purged collection — so they must not go through the same mapping, or
+     * a failed upload would wipe the collection it belongs to.
+     *
+     * @property message Description reported by the server.
+     */
+    public class BlobRefused(
+        message: String,
+    ) : SyncTransportFailure(message)
+
+    /**
      * The cursor has fallen out of the server's retention window.
      *
      * Recoverable, but only by bootstrapping: the changes between the cursor and the window are

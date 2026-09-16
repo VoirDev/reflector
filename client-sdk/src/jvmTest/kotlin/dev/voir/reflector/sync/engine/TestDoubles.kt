@@ -4,6 +4,7 @@ import dev.voir.reflector.sync.core.adapter.CollectionAdapter
 import dev.voir.reflector.sync.core.adapter.RemoteOp
 import dev.voir.reflector.sync.core.adapter.SchemaFingerprint
 import dev.voir.reflector.sync.core.adapter.SyncRejection
+import dev.voir.reflector.sync.core.blob.BlobRef
 import dev.voir.reflector.sync.core.conflict.Conflict
 import dev.voir.reflector.sync.core.conflict.Resolution
 import dev.voir.reflector.sync.core.metrics.SyncMetricEvent
@@ -126,6 +127,15 @@ class FakeAdapter : CollectionAdapter {
      * still behind it.
      */
     var beforeApply: suspend (List<RemoteOp>) -> Unit = { }
+
+    /** What each document is declared to point at, keyed the same way as [bodies]. */
+    val references: MutableMap<Pair<EntityType, EntityId>, Set<BlobRef>> = mutableMapOf()
+
+    override fun blobs(
+        entityType: EntityType,
+        id: EntityId,
+        document: JsonObject,
+    ): Set<BlobRef> = references[entityType to id].orEmpty()
 
     override suspend fun snapshot(
         entityType: EntityType,

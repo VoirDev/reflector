@@ -29,6 +29,9 @@ public enum class SyncLogSource(
     /** Serving pages of a snapshot to a client that is rebuilding a collection. */
     SNAPSHOT("snapshot"),
 
+    /** Registering files, accepting their bytes, and handing out permission to move them. */
+    BLOBS("blobs"),
+
     /** Trimming history to the retention window, and purging a scope or a collection outright. */
     MAINTENANCE("maintenance"),
 }

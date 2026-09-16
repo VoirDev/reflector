@@ -16,7 +16,6 @@ import dev.voir.reflector.sync.openTestDatabase
 import dev.voir.reflector.sync.persistence.RoomSyncTransactionRunner
 import dev.voir.reflector.sync.persistence.SyncStores
 import dev.voir.reflector.sync.protocol.CollectionId
-import dev.voir.reflector.sync.protocol.Cursor
 import dev.voir.reflector.sync.protocol.EntityId
 import dev.voir.reflector.sync.protocol.EntityType
 import dev.voir.reflector.sync.protocol.EntityVersion

@@ -43,7 +43,7 @@ android {
         targetCompatibility = JavaVersion.toVersion(libs.versions.androidJvmTarget.get())
     }
 
-    sourceSets["main"].kotlin.srcDir("src/main/kotlin")
+    sourceSets["main"].kotlin.directories.add("src/main/kotlin")
 }
 
 dependencies {

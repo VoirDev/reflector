@@ -18,6 +18,10 @@ import kotlin.time.Duration.Companion.days
  * @property retentionDays History window in whole days. A cursor older than the window is refused
  *   with a stale-cursor error, so a client that has been offline longer can go to a bootstrap
  *   directly instead of trying a doomed pull first.
+ * @property blobs Limits on files, or `null` from a server that does not serve them at all. The
+ *   distinction is worth a nullable field rather than zeroed numbers: an application configured to
+ *   synchronise files against a deployment that has no storage behind it has a misconfiguration to
+ *   be told about at start-up, and zeroes would instead present it as every file being too large.
  */
 @Serializable
 public data class SyncLimits(
@@ -25,6 +29,7 @@ public data class SyncLimits(
     public val maxDocumentBytes: Int,
     public val maxChangesPageSize: Int,
     public val retentionDays: Int,
+    public val blobs: BlobLimits? = null,
 ) {
     /** Retention window as a duration, for comparisons against locally measured offline time. */
     public val retention: Duration

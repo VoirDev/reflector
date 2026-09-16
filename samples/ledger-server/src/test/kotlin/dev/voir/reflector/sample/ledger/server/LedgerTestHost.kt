@@ -5,7 +5,7 @@ import com.zaxxer.hikari.HikariDataSource
 import dev.voir.reflector.sync.server.postgres.SyncMigrations
 import org.jetbrains.exposed.v1.jdbc.Database
 import org.jetbrains.exposed.v1.jdbc.transactions.transaction
-import org.testcontainers.containers.PostgreSQLContainer
+import org.testcontainers.postgresql.PostgreSQLContainer
 
 /**
  * The one PostgreSQL the tests of this module share.
@@ -35,7 +35,10 @@ object LedgerTestHost {
     /** Empties everything the module owns, so that a test starts from a server that knows nothing. */
     fun clean() {
         transaction(database) {
-            exec("TRUNCATE sync.collections, sync.batches, sync.changes, sync.entities, sync.push_results CASCADE")
+            exec(
+                "TRUNCATE sync.collections, sync.batches, sync.changes, sync.entities, " +
+                    "sync.push_results, sync.blobs, sync.blob_refs CASCADE",
+            )
         }
     }
 }

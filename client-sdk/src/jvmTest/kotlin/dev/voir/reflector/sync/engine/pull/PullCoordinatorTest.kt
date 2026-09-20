@@ -39,6 +39,7 @@ import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import kotlin.time.Instant
 import kotlin.uuid.Uuid
 
 class PullCoordinatorTest {
@@ -246,6 +247,38 @@ class PullCoordinatorTest {
         }
 
     @Test
+    fun `a pull that finds nothing still records when it spoke to the server`() =
+        runTest {
+            goLive()
+            clock.instant = Instant.fromEpochMilliseconds(1_700_000_000_000)
+            transport.onChanges = { ChangesPage(emptyList(), null, hasMore = false, epoch = TEST_EPOCH) }
+
+            assertEquals(PullOutcome.UpToDate, coordinator.pull())
+
+            // The shape of every cycle on a client that is in step. Before this was written down,
+            // the row said "never pulled" for exactly those clients, and an application asking it
+            // when synchronisation last happened had to answer "never" for a healthy device.
+            val state = assertNotNull(stores.collections.find(scope, collection))
+            assertEquals(1_700_000_000_000, state.lastPullAt?.toEpochMilliseconds())
+            assertNull(state.cursor, "a pull that carried nothing must not move the cursor")
+        }
+
+    @Test
+    fun `a pull that finds nothing leaves a failing push's count alone`() =
+        runTest {
+            goLive()
+            stores.collections.recordFailure(scope, collection, "push refused")
+            transport.onChanges = { ChangesPage(emptyList(), null, hasMore = false, epoch = TEST_EPOCH) }
+
+            coordinator.pull()
+
+            // Pulls succeed on every cycle a client is online. Clearing the counter here would
+            // reset the backoff of a push that is failing over and over, and the client would
+            // never be reported as failing at all.
+            assertEquals(1, assertNotNull(stores.collections.find(scope, collection)).failureCount)
+        }
+
+    @Test
     fun `a removal is applied and leaves a tombstone`() =
         runTest {
             goLive()
@@ -290,7 +323,7 @@ class PullCoordinatorTest {
             adapter.beforeApply = { }
             transport.onChanges = { throw SyncTransportFailure.Unreachable("offline") }
 
-            assertEquals(PullOutcome.Blocked, newCoordinator().pull())
+            assertIs<PullOutcome.Blocked>(newCoordinator().pull())
 
             assertEquals(body("Cash"), adapter.bodies[wallet to entity(1)])
             assertEquals(testCursor("10"), assertNotNull(stores.collections.find(scope, collection)).cursor)

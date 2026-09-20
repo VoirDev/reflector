@@ -93,12 +93,35 @@ class SyncCollectionDaoTest {
             seed(phase = SyncPhase.BOOTSTRAPPING, bootstrapPage = "p7")
             dao.recordFailure(scope, ledger, "one page failed on the way")
 
-            dao.finishBootstrap(scope, ledger, cursor = "1100", phase = SyncPhase.LIVE)
+            dao.finishBootstrap(
+                scope,
+                ledger,
+                cursor = "1100",
+                phase = SyncPhase.LIVE,
+                appliedAt = 1_700_000_000_000,
+            )
 
             assertEquals("1100", state().cursor)
             assertEquals(SyncPhase.LIVE, state().phase)
             assertNull(state().bootstrapPage)
             assertEquals(0, state().failureCount)
+            assertEquals(1_700_000_000_000, state().lastPullAt)
+        }
+
+    @Test
+    fun `a pull that caught up records its time without disturbing anything else`() =
+        runTest {
+            seed(phase = SyncPhase.LIVE)
+            dao.recordFailure(scope, ledger, "a push was refused")
+
+            dao.recordPull(scope, ledger, polledAt = 1_700_000_000_000)
+
+            assertEquals(1_700_000_000_000, state().lastPullAt)
+            assertNull(state().cursor, "catching up on an empty log must not invent a cursor")
+            // A pull succeeds on every cycle a client is online. Clearing these here would reset
+            // the backoff of a push that keeps failing, and hide the failure entirely.
+            assertEquals(1, state().failureCount)
+            assertEquals("a push was refused", state().lastError)
         }
 
     @Test

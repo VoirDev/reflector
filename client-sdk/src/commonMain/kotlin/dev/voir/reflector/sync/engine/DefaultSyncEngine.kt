@@ -11,6 +11,7 @@ import dev.voir.reflector.sync.core.log.SyncLogEvent
 import dev.voir.reflector.sync.core.log.SyncLogger
 import dev.voir.reflector.sync.core.metrics.SyncMetrics
 import dev.voir.reflector.sync.core.transport.BlobTransport
+import dev.voir.reflector.sync.core.transport.NetworkAvailability
 import dev.voir.reflector.sync.core.transport.SyncEventChannel
 import dev.voir.reflector.sync.core.transport.SyncTransport
 import dev.voir.reflector.sync.core.trigger.PeriodicTriggerSource
@@ -46,6 +47,11 @@ import kotlin.uuid.Uuid
  *   expects; an application whose files are large sets it once here and overrides it per reference
  *   through [dev.voir.reflector.sync.core.blob.BlobRef.fetch] where the choice differs. It says
  *   nothing about uploads: a file this device created is always sent.
+ * @param network What the application knows about this device's own connection. It changes nothing
+ *   about how synchronising behaves; it decides only whether a request that never arrived is
+ *   reported as [dev.voir.reflector.sync.core.ScopeState.Offline] or as
+ *   [dev.voir.reflector.sync.core.ScopeState.ServerUnreachable]. Without one the library reports
+ *   the latter, because that is the part it witnessed.
  * @param eventChannel Optional push channel telling the client when there is something to pull.
  *   Without it everything still works, only later — on the client's own triggers.
  * @param triggerSources Reasons to synchronise supplied by the application. The default is a plain
@@ -81,6 +87,7 @@ public fun SyncEngine(
     blobStore: BlobStore? = null,
     blobTransport: BlobTransport? = null,
     blobFetch: BlobFetch = BlobFetch.EAGER,
+    network: NetworkAvailability? = null,
     eventChannel: SyncEventChannel? = null,
     triggerSources: List<SyncTriggerSource> = listOf(PeriodicTriggerSource()),
     conflictThreshold: ConflictThreshold = ConflictThreshold.Default,
@@ -107,6 +114,7 @@ public fun SyncEngine(
         blobStore = blobStore,
         blobTransport = blobTransport,
         blobFetch = blobFetch,
+        network = network,
         eventChannel = eventChannel,
         triggerSources = triggerSources,
         conflictThreshold = conflictThreshold,
@@ -133,6 +141,7 @@ internal class DefaultSyncEngine(
     private val blobStore: BlobStore?,
     private val blobTransport: BlobTransport?,
     private val blobFetch: BlobFetch,
+    private val network: NetworkAvailability?,
     private val eventChannel: SyncEventChannel?,
     private val triggerSources: List<SyncTriggerSource>,
     private val conflictThreshold: ConflictThreshold,
@@ -186,6 +195,7 @@ internal class DefaultSyncEngine(
             blobStore = blobStore,
             blobTransport = blobTransport,
             blobFetch = blobFetch,
+            network = network,
             eventChannel = eventChannel,
             triggerSources = triggerSources,
             conflictThreshold = conflictThreshold,

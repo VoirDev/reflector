@@ -63,7 +63,10 @@ sync_collection(
                                        -- from the open conflict count when state is published
   generation INTEGER NOT NULL,         -- ++ on every bootstrap (mark & sweep)
   bootstrap_page TEXT NULL,
-  last_pull_at INTEGER, last_push_at INTEGER,
+  last_pull_at INTEGER,                -- every pull that reached the end of the log, empty
+                                       -- or not, and every finished bootstrap
+  last_push_at INTEGER,                -- only a push the server applied; a client with an
+                                       -- empty queue never pushes, so this can lag far behind
   schema_fingerprint TEXT NULL,        -- the application's declared shape of its own tables
   last_error TEXT NULL, failure_count INTEGER
 );

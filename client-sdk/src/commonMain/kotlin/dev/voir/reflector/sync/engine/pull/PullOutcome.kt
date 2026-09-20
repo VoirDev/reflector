@@ -9,8 +9,19 @@ internal sealed class PullOutcome {
     /** Everything the server had at the moment of reading has been applied. */
     data object UpToDate : PullOutcome()
 
-    /** The pull could not finish and will be retried after a backoff. */
-    data object Blocked : PullOutcome()
+    /**
+     * The pull could not finish and will be retried after a backoff.
+     *
+     * It carries what went wrong because the worker has to classify it: an unreachable server is
+     * what a device losing its connection mid-session looks like, and the scope's connection state
+     * would otherwise never notice. Everything else about a blocked pull is the coordinator's
+     * business and has already been written down.
+     *
+     * @property failure What the transport reported.
+     */
+    data class Blocked(
+        val failure: SyncTransportFailure,
+    ) : PullOutcome()
 
     /**
      * Incremental reading is no longer possible and the collection needs a snapshot.

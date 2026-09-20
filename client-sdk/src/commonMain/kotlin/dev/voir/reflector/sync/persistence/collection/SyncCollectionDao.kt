@@ -71,6 +71,33 @@ public interface SyncCollectionDao {
     )
 
     /**
+     * Records that a pull reached the end of the log.
+     *
+     * Separate from [advanceCursor] because most successful pulls apply nothing: a client that is
+     * already in step asks the server for changes on every cycle and is told there are none. Only
+     * [advanceCursor] used to write `last_pull_at`, so the row said "never pulled" for exactly the
+     * clients that were most up to date, and an application reading it to answer "when did this
+     * last synchronise" reported never for a healthy device.
+     *
+     * It writes that one column and nothing else. Clearing `last_error` and `failure_count` here
+     * would reset them on every cycle a client is online, which would hide a push that is failing
+     * repeatedly — a pull succeeding says nothing about a push.
+     *
+     * @param scopeId Scope of the collection.
+     * @param collectionId Identifier of the collection.
+     * @param polledAt Local timestamp of the pull, in epoch milliseconds, for diagnostics.
+     */
+    @Query(
+        "UPDATE sync_collection SET last_pull_at = :polledAt " +
+            "WHERE scope_id = :scopeId AND collection_id = :collectionId",
+    )
+    public suspend fun recordPull(
+        scopeId: String,
+        collectionId: String,
+        polledAt: Long,
+    )
+
+    /**
      * Sets the cursor without touching anything else.
      *
      * Used during a bootstrap to remember the position the snapshot was taken at. It has to be
@@ -166,14 +193,19 @@ public interface SyncCollectionDao {
     /**
      * Finishes a bootstrap: adopts the cursor the snapshot was taken at and goes live.
      *
+     * The pull time is written here as well. A bootstrap is the largest exchange the library ever
+     * performs, so a client that has just transferred a whole snapshot and reported nothing about
+     * when it did would be the worst case of the gap [recordPull] closes.
+     *
      * @param scopeId Scope of the collection.
      * @param collectionId Identifier of the collection.
      * @param cursor Cursor the server fixed before the first snapshot page.
      * @param phase Phase to enter, always [SyncPhase.LIVE].
+     * @param appliedAt Local timestamp of the finished transfer, in epoch milliseconds.
      */
     @Query(
         "UPDATE sync_collection SET cursor = :cursor, phase = :phase, bootstrap_page = NULL, " +
-            "last_error = NULL, failure_count = 0 " +
+            "last_pull_at = :appliedAt, last_error = NULL, failure_count = 0 " +
             "WHERE scope_id = :scopeId AND collection_id = :collectionId",
     )
     public suspend fun finishBootstrap(
@@ -181,6 +213,7 @@ public interface SyncCollectionDao {
         collectionId: String,
         cursor: String,
         phase: SyncPhase,
+        appliedAt: Long,
     )
 
     /**

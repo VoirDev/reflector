@@ -28,10 +28,14 @@ import dev.voir.reflector.sync.persistence.SyncColumnConverters
  *   touched by the current bootstrap carry it, and everything left behind is swept afterwards.
  * @property bootstrapPage Continuation token of an unfinished snapshot transfer, or `null` when no
  *   bootstrap is in progress.
- * @property lastPullAt Local timestamp of the last successful pull, in epoch milliseconds. Purely
- *   diagnostic: client clocks take part in no decision about order or versions.
- * @property lastPushAt Local timestamp of the last successful push, in epoch milliseconds. Also
- *   purely diagnostic.
+ * @property lastPullAt Local timestamp of the last pull that reached the end of the log, in epoch
+ *   milliseconds, whether or not it applied anything — a client in step pulls nothing on most
+ *   cycles, and this is what lets an application say when it last synchronised rather than when
+ *   data last moved. A finished bootstrap writes it too. Purely diagnostic: client clocks take part
+ *   in no decision about order or versions.
+ * @property lastPushAt Local timestamp of the last push the server applied, in epoch milliseconds.
+ *   Unlike [lastPullAt] it moves only when there was something to send, because a client with an
+ *   empty queue does not push at all. Also purely diagnostic.
  * @property schemaFingerprint Shape of the application's tables as it was when this collection was
  *   last synchronised, or `null` when the adapter declares none. A value different from the one the
  *   adapter declares now means the rows have been rewritten underneath the cursor, and the

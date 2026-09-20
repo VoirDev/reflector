@@ -3,6 +3,7 @@ package dev.voir.reflector.sync.engine
 import dev.voir.reflector.sync.core.CollectionSyncState
 import dev.voir.reflector.sync.core.ConflictThreshold
 import dev.voir.reflector.sync.core.SyncEngine
+import dev.voir.reflector.sync.core.ScopeState
 import dev.voir.reflector.sync.core.SyncFailure
 import dev.voir.reflector.sync.core.SyncPhase
 import dev.voir.reflector.sync.core.adapter.CollectionAdapter
@@ -12,6 +13,7 @@ import dev.voir.reflector.sync.core.log.RecordingSyncLog
 import dev.voir.reflector.sync.core.log.SyncLogEvent
 import dev.voir.reflector.sync.core.log.SyncLogLevel
 import dev.voir.reflector.sync.core.log.SyncLogRecord
+import dev.voir.reflector.sync.core.transport.NetworkAvailability
 import dev.voir.reflector.sync.core.transport.SyncChannelSignal
 import dev.voir.reflector.sync.core.transport.SyncEventChannel
 import dev.voir.reflector.sync.core.transport.SyncTransportFailure
@@ -114,6 +116,21 @@ class SyncEngineTest {
         assertNotNull(reached, diagnosis)
     }
 
+    /**
+     * Waits until the scope reports a connection state, so a test never reads one before the worker
+     * has classified the failure that produces it.
+     *
+     * @param description What was being waited for, for the failure message.
+     * @param expected State the scope has to reach.
+     */
+    private suspend fun StateFlow<ScopeState>.awaitState(
+        description: String,
+        expected: ScopeState,
+    ) {
+        val reached = withTimeoutOrNull(AWAIT_TIMEOUT_MILLIS) { first { it == expected } }
+        assertNotNull(reached, "never reached $description; state=$value pushes=${transport.pushes.size}")
+    }
+
     /** Cycles the engine has reported finishing, which is how a test waits for one to happen. */
     private fun cyclesFinished(): Int = logs.records.value.count { it.event == SyncLogEvent.CYCLE_FINISHED }
 
@@ -155,6 +172,7 @@ class SyncEngineTest {
         eventChannel: SyncEventChannel? = null,
         triggerSources: List<SyncTriggerSource> = emptyList(),
         conflictThreshold: ConflictThreshold = ConflictThreshold.Default,
+        network: NetworkAvailability? = null,
     ): SyncEngine =
         SyncEngine(
             database = database,
@@ -162,6 +180,7 @@ class SyncEngineTest {
             transport = transport,
             adapters = adapters,
             coroutineScope = coroutineScope,
+            network = network,
             eventChannel = eventChannel,
             triggerSources = triggerSources,
             conflictThreshold = conflictThreshold,
@@ -354,6 +373,37 @@ class SyncEngineTest {
             assertEquals(PushGroupState.PENDING, head.state)
             assertEquals(1, head.attempts)
             assertNotNull(head.nextRetryAt)
+        }
+
+    @Test
+    fun `a server that does not answer is not reported as the device being offline`() =
+        runBlocking<Unit> {
+            transport.onSnapshot = { emptySnapshot() }
+            val scope = engine(workers).scope(scopeId)
+            val collection = scope.collection(ledger)
+            collection.state.await("a live collection") { it.phase == SyncPhase.LIVE }
+
+            transport.onChanges = { throw SyncTransportFailure.Unreachable("no answer") }
+            collection.requestSync()
+            // Nothing was supplied that could say whether this device has a network, so the only
+            // honest report is the part the library witnessed: the request did not arrive.
+            // Claiming the device is offline without having looked would be a guess.
+            scope.state.awaitState("a server that did not answer", ScopeState.ServerUnreachable)
+        }
+
+    @Test
+    fun `a device the application says has no network is reported as offline`() =
+        runBlocking<Unit> {
+            transport.onSnapshot = { emptySnapshot() }
+            val scope = engine(workers, network = { false }).scope(scopeId)
+            val collection = scope.collection(ledger)
+            collection.state.await("a live collection") { it.phase == SyncPhase.LIVE }
+
+            transport.onChanges = { throw SyncTransportFailure.Unreachable("no route") }
+            collection.requestSync()
+            // The same transport failure as the case above. What separates them is the only thing
+            // that can: the platform answering for the device itself.
+            scope.state.awaitState("a device with no network", ScopeState.Offline)
         }
 
     @Test

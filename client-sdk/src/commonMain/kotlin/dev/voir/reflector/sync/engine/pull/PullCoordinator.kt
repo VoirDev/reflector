@@ -111,10 +111,17 @@ internal class PullCoordinator(
             drainInbox { applied++ }?.let { return it }
 
             if (!page.hasMore) {
+                val finishedAt = clock.now()
+                // Written whether or not anything was applied. Advancing the cursor records the
+                // time too, but only a pull that carried something advances it — so without this
+                // the row says "never pulled" for precisely the clients that are most up to date.
+                transactions.transaction {
+                    stores.collections.recordPull(scope, collection, finishedAt.toEpochMilliseconds())
+                }
                 // Only a pull that reached the end reports: one that stopped on a failure or on a
                 // required bootstrap read an unknown share of what was there.
                 metrics.emit(
-                    SyncMetricEvent.PullCompleted(scope, collection, applied, clock.now() - startedAt),
+                    SyncMetricEvent.PullCompleted(scope, collection, applied, finishedAt - startedAt),
                     log,
                 )
                 return PullOutcome.UpToDate
@@ -327,7 +334,7 @@ internal class PullCoordinator(
                 transactions.transaction {
                     stores.collections.recordFailure(scope, collection, failure.message.orEmpty())
                 }
-                PullOutcome.Blocked
+                PullOutcome.Blocked(failure)
             }
         }
 

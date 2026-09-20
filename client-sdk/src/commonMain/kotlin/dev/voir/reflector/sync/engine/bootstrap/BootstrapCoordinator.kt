@@ -135,6 +135,7 @@ internal class BootstrapCoordinator(
             page = snapshot.nextPage ?: break
         }
 
+        val finishedAt = clock.now()
         transactions.transaction {
             sweep(start.generation)
             stores.collections.finishBootstrap(
@@ -143,12 +144,13 @@ internal class BootstrapCoordinator(
                 // Non-null by the shape of the loop above: the only way out of it that reaches here
                 // runs the body at least once, and the body fixes the cursor before it can break.
                 cursor = cursor,
+                appliedAt = finishedAt.toEpochMilliseconds(),
             )
         }
         // Only a bootstrap that finished is reported, and it reports its own pages alone: a run
         // resumed after an interruption did not transfer what the run before it already applied,
         // and adding those in would describe work nobody did.
-        val took = clock.now() - startedAt
+        val took = finishedAt - startedAt
         metrics.emit(SyncMetricEvent.BootstrapCompleted(scope, collection, items, took), log)
         log.info(
             SyncLogEvent.BOOTSTRAP_FINISHED,

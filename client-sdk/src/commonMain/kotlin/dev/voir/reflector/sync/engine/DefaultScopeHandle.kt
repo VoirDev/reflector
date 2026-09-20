@@ -13,6 +13,7 @@ import dev.voir.reflector.sync.core.log.SyncLogEvent
 import dev.voir.reflector.sync.core.log.SyncLogger
 import dev.voir.reflector.sync.core.metrics.SyncMetrics
 import dev.voir.reflector.sync.core.transport.BlobTransport
+import dev.voir.reflector.sync.core.transport.NetworkAvailability
 import dev.voir.reflector.sync.core.transport.SyncChannelSignal
 import dev.voir.reflector.sync.core.transport.SyncEventChannel
 import dev.voir.reflector.sync.core.transport.SyncTransport
@@ -51,6 +52,9 @@ import kotlin.uuid.Uuid
  * @param blobStore Application's own file store, or `null` when it synchronises no files.
  * @param blobTransport Connection to the server's file endpoints, required alongside [blobStore].
  * @param blobFetch Policy for a reference that declares none of its own.
+ * @param network What the application knows about this device's own connection, or `null` when it
+ *   supplies nothing. It changes nothing about how the scope behaves — only whether an unreachable
+ *   server is reported as this device being offline or as the server not answering.
  * @param eventChannel Optional push channel; without it the scope still synchronises, only on its
  *   own triggers rather than on the server's.
  * @param triggerSources Reasons to synchronise that the application supplies — returning to the
@@ -72,6 +76,7 @@ internal class DefaultScopeHandle(
     private val blobStore: BlobStore?,
     private val blobTransport: BlobTransport?,
     private val blobFetch: BlobFetch,
+    private val network: NetworkAvailability?,
     private val eventChannel: SyncEventChannel?,
     private val triggerSources: List<SyncTriggerSource>,
     private val conflictThreshold: ConflictThreshold,
@@ -134,6 +139,7 @@ internal class DefaultScopeHandle(
                     transactions = transactions,
                     transport = transport,
                     adapter = adapter,
+                    network = network,
                     scopeState = mutableState,
                     metrics = metrics,
                     log = logger.forCollection(id),
@@ -181,7 +187,10 @@ internal class DefaultScopeHandle(
         channel.signals(scopeId).collect { signal ->
             when (signal) {
                 is SyncChannelSignal.Connected -> {
+                    // From either way of not having reached the server: the socket being up is
+                    // proof that both the device and the server are there.
                     mutableState.compareAndSet(ScopeState.Offline, ScopeState.Online)
+                    mutableState.compareAndSet(ScopeState.ServerUnreachable, ScopeState.Online)
                     workersByCollection.values.forEach { it.requestSync() }
                 }
 
@@ -241,8 +250,8 @@ internal class DefaultScopeHandle(
     /**
      * Explains what a scope state means for the application, for the line that reports reaching it.
      *
-     * The four states differ in who has to act, which is the only thing worth saying about them
-     * here: nobody, the user, or nobody ever again.
+     * The states differ in who has to act, which is the only thing worth saying about them here:
+     * nobody, the user, or nobody ever again.
      *
      * @return One sentence describing the consequence of being in this state.
      */
@@ -253,7 +262,11 @@ internal class DefaultScopeHandle(
             }
 
             ScopeState.Offline -> {
-                "the server cannot be reached; local changes keep queueing, which is normal"
+                "the device has no network; local changes keep queueing, which is normal"
+            }
+
+            ScopeState.ServerUnreachable -> {
+                "the device has a network but the server did not answer; local changes keep queueing"
             }
 
             ScopeState.AuthRequired -> {

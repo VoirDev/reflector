@@ -34,6 +34,7 @@ import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import kotlin.time.Instant
 import kotlin.uuid.Uuid
 
 class BootstrapCoordinatorTest {
@@ -103,6 +104,21 @@ class BootstrapCoordinatorTest {
             assertNull(state.bootstrapPage)
             val record = assertNotNull(stores.records.find(scope, collection, wallet, entity(2)))
             assertEquals(EntityVersion("11"), record.serverVersion)
+        }
+
+    @Test
+    fun `a finished bootstrap records when the snapshot arrived`() =
+        runTest {
+            clock.instant = Instant.fromEpochMilliseconds(1_700_000_000_000)
+            transport.onSnapshot = { snapshot(item(1, "10", "Cash")) }
+
+            assertEquals(BootstrapOutcome.Completed, coordinator.bootstrap())
+
+            // The largest exchange the library performs. A client that had just transferred a whole
+            // snapshot used to report that it had never pulled, which is the worst case of the gap
+            // an empty pull's timestamp closes.
+            val state = assertNotNull(stores.collections.find(scope, collection))
+            assertEquals(1_700_000_000_000, state.lastPullAt?.toEpochMilliseconds())
         }
 
     @Test

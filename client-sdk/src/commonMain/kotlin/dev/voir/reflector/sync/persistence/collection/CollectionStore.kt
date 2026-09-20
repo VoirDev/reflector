@@ -102,6 +102,26 @@ internal class CollectionStore(
     }
 
     /**
+     * Records that a pull reached the end of the log.
+     *
+     * Called by a pull that caught up whether or not it applied anything, because "the client and
+     * the server spoke and there was nothing to do" is the ordinary shape of a cycle on a client
+     * that is in step — and it is the answer an application needs to say when it last
+     * synchronised. See [SyncCollectionDao.recordPull] for why it writes only the timestamp.
+     *
+     * @param scope Scope of the collection.
+     * @param collection Identifier of the collection.
+     * @param polledAt Local timestamp of the pull, in epoch milliseconds.
+     */
+    public suspend fun recordPull(
+        scope: ScopeId,
+        collection: CollectionId,
+        polledAt: Long,
+    ) {
+        dao.recordPull(scope.value, collection.value, polledAt)
+    }
+
+    /**
      * Remembers the position a bootstrap snapshot was taken at.
      *
      * @param scope Scope of the collection.
@@ -182,13 +202,16 @@ internal class CollectionStore(
      * @param scope Scope of the collection.
      * @param collection Identifier of the collection.
      * @param cursor Cursor the server fixed before the first snapshot page.
+     * @param appliedAt Local timestamp of the finished transfer, in epoch milliseconds. A bootstrap
+     * is an exchange like any other and records when it happened — see [recordPull].
      */
     public suspend fun finishBootstrap(
         scope: ScopeId,
         collection: CollectionId,
         cursor: Cursor,
+        appliedAt: Long,
     ) {
-        dao.finishBootstrap(scope.value, collection.value, cursor.value, SyncPhase.LIVE)
+        dao.finishBootstrap(scope.value, collection.value, cursor.value, SyncPhase.LIVE, appliedAt)
     }
 
     /**

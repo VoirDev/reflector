@@ -1,6 +1,7 @@
 package dev.voir.reflector.sync.engine
 
 import dev.voir.reflector.sync.core.ScopeState
+import dev.voir.reflector.sync.core.transport.NetworkAvailability
 import dev.voir.reflector.sync.core.SyncFailure
 import dev.voir.reflector.sync.core.SyncPhase
 import dev.voir.reflector.sync.core.adapter.CollectionAdapter
@@ -61,6 +62,9 @@ import kotlin.uuid.Uuid
  * @param transactions Transaction boundary of the application's database.
  * @param transport Connection to the server.
  * @param adapter Application's bridge to its own rows.
+ * @param network What the application knows about this device's own connection, or `null` when it
+ *   supplies nothing — used only to tell a device with no network apart from a server that is not
+ *   answering.
  * @param scopeState State shared by every collection of the scope.
  * @param metrics Sink the worker and its coordinators report through.
  * @param log Sink the worker and its coordinators describe their decisions through, already bound
@@ -83,6 +87,7 @@ internal class CollectionWorker(
     private val transactions: SyncTransactionRunner,
     private val transport: SyncTransport,
     private val adapter: CollectionAdapter,
+    private val network: NetworkAvailability?,
     private val scopeState: MutableStateFlow<ScopeState>,
     private val metrics: SyncMetrics,
     private val log: SyncLogger,
@@ -237,7 +242,11 @@ internal class CollectionWorker(
             is PullOutcome.Interrupted -> return interrupt(outcome.failure)
             PullOutcome.ResetRequired -> return resetToServer(bootstrap)
             PullOutcome.BootstrapRequired -> if (!bootstrap(bootstrap)) return
-            PullOutcome.Blocked -> Unit
+            // The cycle's one reliable report of whether the server is reachable. A push that
+            // fails schedules its own retry and says nothing about the scope, and the limits are
+            // read once and cached, so without this a device that lost its connection after the
+            // first cycle stayed "online" until it was restarted.
+            is PullOutcome.Blocked -> recordFailure(outcome.failure)
             PullOutcome.UpToDate -> lastFailure.value = null
         }
         offerConflicts()
@@ -661,7 +670,15 @@ internal class CollectionWorker(
         lastFailure.value =
             when (failure) {
                 is SyncTransportFailure.Unreachable -> {
-                    scopeState.compareAndSet(ScopeState.Online, ScopeState.Offline)
+                    // Which of the two it is, is the application's to answer: the library only saw
+                    // a request that did not arrive. Without a monitor it says what it witnessed.
+                    val reached =
+                        if (network?.hasNetwork() == false) {
+                            ScopeState.Offline
+                        } else {
+                            ScopeState.ServerUnreachable
+                        }
+                    scopeState.compareAndSet(ScopeState.Online, reached)
                     SyncFailure.Network(failure.describe(), failure.cause)
                 }
 

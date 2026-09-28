@@ -25,6 +25,18 @@ val projectVersion =
         .orElse(providers.fileContents(layout.projectDirectory.file("VERSION")).asText.map { it.trim() })
         .get()
 
+/**
+ * The commit a release is built from, written into every POM it publishes.
+ *
+ * Publication reads it back from a version the registry already holds, to tell the rerun of a
+ * release that failed halfway from a different build published under the same number. Only the
+ * scripts under `ci/release` set it; an ordinary build leaves it out of the POM altogether.
+ */
+val releaseRevision = providers.gradleProperty("releaseRevision")
+
+/** The repository on GitHub: where the source lives, and the owner of its Maven packages. */
+val sourceRepositoryUrl = "https://github.com/VoirDev/reflector"
+
 allprojects {
     // One group for the whole repository. This works only because no two modules share a name:
     // a repository with `client-sdk/sync-core` and `server-sdk/sync-core` would publish both as
@@ -180,17 +192,47 @@ allprojects {
     }
 
     extensions.configure<PublishingExtension> {
+        repositories {
+            // A directory inside the build, which the release scripts build every artifact into
+            // before anything leaves the machine: the release pull request stops there, and
+            // publication checks what landed in it against ci/release/packages first.
+            maven {
+                name = "release"
+                url = uri(rootProject.layout.buildDirectory.dir("release/repository"))
+            }
+            // GitHub Packages, which only Publish Release writes to. The credentials are the
+            // `gitHubPackagesUsername` and `gitHubPackagesPassword` Gradle properties, read when a
+            // task publishes here and not before, so every other build runs without them.
+            maven {
+                name = "gitHubPackages"
+                url = uri("https://maven.pkg.github.com/VoirDev/reflector")
+                credentials(PasswordCredentials::class)
+            }
+        }
+
         // `configureEach` rather than a loop: the multiplatform plugin adds its publications
         // late, and anything eager here would describe only the ones that already exist.
         publications.withType<MavenPublication>().configureEach {
             pom {
                 name.set(coordinates.first)
                 description.set(coordinates.second)
+                url.set(sourceRepositoryUrl)
 
-                // `licenses`, `scm` and `developers` are deliberately absent: the repository has
-                // no licence file and no remote, and a POM is the wrong place to invent either.
-                // Maven Central rejects a POM without them, so they are the first thing to add
-                // when publishing stops being local.
+                scm {
+                    url.set(sourceRepositoryUrl)
+                    connection.set("scm:git:$sourceRepositoryUrl.git")
+                    developerConnection.set("scm:git:$sourceRepositoryUrl.git")
+                }
+
+                // Absent unless a release script names the commit: see `releaseRevision`. Read
+                // here rather than handed over as a provider, because a map property given an
+                // absent entry loses its whole value, not just that entry.
+                releaseRevision.orNull?.let { properties.put("reflector.revision", it) }
+
+                // `licenses` and `developers` are deliberately absent: the repository has no
+                // licence file, and a POM is the wrong place to invent one. GitHub Packages does
+                // not ask for them; Maven Central rejects a POM without them, so they are the
+                // first thing to add before publishing there.
             }
         }
     }

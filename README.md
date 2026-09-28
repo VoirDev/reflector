@@ -336,16 +336,47 @@ and the bundled Ktor client goes unused.
 ./gradlew spotlessApply      # format
 ./gradlew spotlessCheck      # verify formatting
 ./gradlew publishToMavenLocal # publish the artifacts to ~/.m2 for a local consumer
+ci/verify                    # what a pull request must pass: the whole build
+ci/verify apple              # the Apple targets alone, on macOS
 ```
 
 The published coordinates are `dev.voir.reflector:client-sdk` and
 `dev.voir.reflector:server-sdk`, with `dev.voir.reflector:sync-protocol` arriving transitively
-with either. Nothing is published to a remote repository — see [TODO.md](TODO.md) §2 for what that
-still needs.
+with either. Releases go to GitHub Packages — how to depend on them is at the top of
+[EXAMPLE.md](EXAMPLE.md).
 
 The client is built and tested on JVM, Android and both iOS targets. Tests in `server-sdk` and
 `samples/ledger-server` start PostgreSQL through Testcontainers and need a working Docker;
 everything else runs without external dependencies.
+
+### Continuous integration and releases
+
+Three workflows under [`.github/workflows`](.github/workflows), following the handbook's
+`github-verify-workflow` and `github-release-workflow`, with the logic in [`ci/`](ci) so that it
+runs the same on a laptop:
+
+- **Verify** runs on every pull request into `main`: `ci/verify` on Linux, which has Docker for the
+  server tests, and `ci/verify apple` on macOS, side by side. `Build and check whole repository`
+  gates both and is the check to require. On a release pull request, `Build release artifacts` then
+  builds every package at the proposed version on macOS, without publishing it.
+- **Dependabot** opens weekly update pull requests for the Gradle build and the actions, grouped so
+  that dependencies which only work together — Kotlin, KSP and AGP among them — move together.
+- **Prepare Release**, run by hand from `main`, bumps `VERSION` (or takes an exact version) and opens
+  `Release vX.Y.Z` from `release/vX.Y.Z`.
+- **Publish Release** runs when that pull request is merged: it verifies the merged commit unless the
+  pull request's checks already covered its exact tree, waits for the `release` environment, builds
+  and publishes every package in [`ci/release/packages`](ci/release/packages) from the merged commit,
+  then tags `vX.Y.Z` and writes the GitHub Release. Every step is safe to rerun.
+
+What the repository needs before the first release: the secret `RELEASE_BOT_TOKEN` (a token that may
+push branches and open pull requests — one made with the workflow's own token would start no
+checks) and the variables `RELEASE_BOT_NAME` and `RELEASE_BOT_EMAIL`; an environment named `release`,
+with required reviewers if publication should wait for a person; and a ruleset on `main` requiring
+`Verify / Build and check whole repository` and `Verify / Build release artifacts`. The first release
+is prepared with `version` set to the `0.1.0` that `VERSION` already holds.
+
+A `[skip verify]` in a pull request's body skips its checks. On a release, publication then verifies
+the merged commit itself before anything goes out.
 
 ### Building from a network-isolated environment
 

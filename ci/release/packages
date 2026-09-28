@@ -1,0 +1,24 @@
+# Every Maven artifact a release publishes, as `dev.voir.reflector:<artifact>:<version>`, and the
+# Gradle publication that produces it. The single inventory that the release pull request's build,
+# publication and the release notes all read: an artifact the build produces and this file does not
+# list — a target added to a module, say — fails the release rather than going out unannounced.
+#
+# `module` is what a consumer declares; `variant` is one platform's half of a multiplatform module,
+# which Gradle picks for itself. sync-protocol is not declared by anybody on purpose, but both SDKs
+# depend on it through `api`, so neither resolves without it.
+#
+# A publication task is the stem below followed by `To<Repository>Repository`: `ToRelease` builds
+# into build/release/repository, `ToGitHubPackages` publishes.
+#
+# artifact                          publication task stem                                               kind
+sync-protocol                       :contracts:sync-protocol:publishKotlinMultiplatformPublication      module
+sync-protocol-jvm                   :contracts:sync-protocol:publishJvmPublication                      variant
+sync-protocol-android               :contracts:sync-protocol:publishAndroidPublication                  variant
+sync-protocol-iosarm64              :contracts:sync-protocol:publishIosArm64Publication                 variant
+sync-protocol-iossimulatorarm64     :contracts:sync-protocol:publishIosSimulatorArm64Publication        variant
+client-sdk                          :client-sdk:publishKotlinMultiplatformPublication                   module
+client-sdk-jvm                      :client-sdk:publishJvmPublication                                   variant
+client-sdk-android                  :client-sdk:publishAndroidPublication                               variant
+client-sdk-iosarm64                 :client-sdk:publishIosArm64Publication                              variant
+client-sdk-iossimulatorarm64        :client-sdk:publishIosSimulatorArm64Publication                     variant
+server-sdk                          :server-sdk:publishJvmPublication                                   module

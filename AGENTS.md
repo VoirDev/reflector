@@ -16,6 +16,11 @@ docs/
   sync-server-design.md      Server module specification
   sync-files-design.md       File specification: blobs, references, and who owns the bytes
 .claude/settings.json        Enables the `handbooks` plugin, which carries the engineering standard
+.github/workflows/           Verify, Prepare Release and Publish Release
+.github/dependabot.yml       Weekly, grouped dependency updates for Gradle and the actions
+ci/
+  verify                     What a pull request must pass; the same command locally and in CI
+  release/                   The release scripts, and `packages`, the inventory of what is published
 contracts/
   sync-protocol/             Protocol wire contracts shared by client and server
 client-sdk/                  The client library, one module published as one artifact
@@ -57,7 +62,7 @@ Before any change to Kotlin code, invoke in this order:
    `exposed-v1-5` for the `sync.server.postgres` package of `server-sdk/`, which is mandatory
    before touching it, and `optional-kmp-v1` for three-state partial updates. The plugin also
    carries `kmp-application-architecture`, and `github-verify-workflow` and
-   `github-release-workflow` for when [TODO.md](TODO.md) items 2 and 3 are taken up.
+   `github-release-workflow`, which are mandatory before touching `.github/workflows/` or `ci/`.
 3. Where no skill covers the area — the client SDK's application-level concerns are the current
    example — `kotlin-style` and this repository's own rules are the whole of the standard. That is
    a real answer, not a gap to be filled by guessing at a convention.
@@ -162,7 +167,11 @@ Build configuration:
 - publishing is configured once in the root `build.gradle.kts`: `publishedProjects` lists what is
   published and how each artifact describes itself, and a module absent from that map gets no
   `maven-publish` plugin at all. `./gradlew publishToMavenLocal` puts
-  `dev.voir.reflector:client-sdk` and the rest into `~/.m2`.
+  `dev.voir.reflector:client-sdk` and the rest into `~/.m2`;
+- releases are published to GitHub Packages by the Publish Release workflow and by nothing else.
+  [`ci/release/packages`](ci/release/packages) lists every artifact a release carries, and a
+  release that builds an artifact it does not list is refused — so a target or a published module
+  added to the build is added there in the same change.
 
 The SDK and contract modules are built in strict explicit API mode (`explicitApi()` in the
 module's `kotlin` block): public declarations require explicit visibility and an explicit

@@ -1,0 +1,58 @@
+# Weekly update pull requests for the Gradle build and for the workflows' actions. Each one runs
+# Verify like any other pull request, Apple targets and container tests included, so an update is
+# merged on the same evidence as a change somebody wrote.
+#
+# Dependencies that only work at matching versions are grouped, so that no pull request moves half
+# of a set and fails for it. Kotlin, KSP and the Android Gradle Plugin are one such set: the catalogue
+# keeps them at a point inside the official compatibility matrix, and a KSP release is built for one
+# Kotlin release. They are also what the handbook skills state they were validated against — Kotlin
+# for `kotlin-style`, Exposed for `exposed-v1-5` — so an update moving either past that is a conflict
+# to raise, as AGENTS.md says, rather than one to merge because it is green.
+version: 2
+
+updates:
+  - package-ecosystem: gradle
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      kotlin-toolchain:
+        patterns:
+          - "org.jetbrains.kotlin*"
+          - "com.google.devtools.ksp*"
+          - "com.android.*"
+      kotlinx:
+        patterns:
+          - "org.jetbrains.kotlinx*"
+      ktor:
+        patterns:
+          - "io.ktor*"
+      room:
+        patterns:
+          - "androidx.room3*"
+          - "androidx.sqlite*"
+      exposed:
+        patterns:
+          - "org.jetbrains.exposed*"
+      flyway:
+        patterns:
+          - "org.flywaydb*"
+      testing:
+        patterns:
+          - "org.junit*"
+          - "org.testcontainers*"
+          - "app.cash.turbine*"
+      formatting:
+        patterns:
+          - "com.diffplug.spotless*"
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      actions:
+        patterns:
+          - "*"

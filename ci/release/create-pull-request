@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# Commits the prepared release on its branch, pushes it, and opens its pull request — or finds the
+# one already open and leaves it be. The last step of Prepare Release, after prepare-version has put
+# the checkout on the release branch.
+#
+#   GH_TOKEN                     the release bot's token: a push or pull request made with the
+#                                workflow's own token would start no workflow, so Verify would never
+#                                check the release
+#   RELEASE_BOT_NAME/EMAIL       who the release commit is by
+#   RELEASE_VERSION              the version prepared
+#   SKIP_VERIFY                  `true` to put `[skip verify]` in the pull request's body
+#
+# Never force-pushes: a release branch that moved while this ran is refused rather than overwritten.
+source "$(dirname "$0")/common.sh"
+
+version="${RELEASE_VERSION:?RELEASE_VERSION is required}"
+tag="v$version"
+branch="release/$tag"
+base="${DEFAULT_BRANCH:-main}"
+
+git config user.name "${RELEASE_BOT_NAME:?RELEASE_BOT_NAME is required}"
+git config user.email "${RELEASE_BOT_EMAIL:?RELEASE_BOT_EMAIL is required}"
+
+git add VERSION
+if ! git diff --cached --quiet; then
+    git commit --message "Release $tag"
+elif ! git ls-remote --exit-code --heads origin "$branch" > /dev/null; then
+    # Releasing the version VERSION already holds — the first release, or one prepared by hand —
+    # changes no file, and a pull request needs a commit to exist.
+    git commit --allow-empty --message "Release $tag"
+else
+    echo "$branch already holds this release; nothing to commit"
+fi
+
+git push origin "HEAD:refs/heads/$branch"
+
+existing="$(gh pr list --head "$branch" --base "$base" --state open --json url --jq '.[0].url // empty')"
+if [ -n "$existing" ]; then
+    echo "Release pull request is already open: $existing"
+    if [ "${SKIP_VERIFY:-false}" = true ]; then
+        echo "::warning::skip_verify was asked for, but the open pull request's body is left as it is; add [skip verify] to it by hand"
+    fi
+    exit 0
+fi
+
+body="$(mktemp)"
+trap 'rm -f "$body"' EXIT
+{
+    echo "Releases **$tag**."
+    echo
+    echo "Merging this publishes the packages below to GitHub Packages at \`$version\`, built from the"
+    echo "merged commit once the \`release\` environment approves, then tags \`$tag\` and writes the"
+    echo "GitHub Release. This pull request's \`Verify / Build release artifacts\` check builds every"
+    echo "one of them first, without publishing. To fix something before release, push to"
+    echo "\`$branch\`; the checks run again."
+    echo
+    echo "| Package | Declared by consumers |"
+    echo "| --- | --- |"
+    while read -r artifact _ kind; do
+        if [ "$kind" = module ]; then declared=yes; else declared="no — a platform variant"; fi
+        echo "| \`$GROUP:$artifact:$version\` | $declared |"
+    done < <(packages)
+    if [ "${SKIP_VERIFY:-false}" = true ]; then
+        echo
+        echo "Verification was skipped when this release was prepared. Publishing verifies the merged"
+        echo "commit itself instead. Remove the marker below to run the checks here."
+        echo
+        echo "[skip verify]"
+    fi
+} > "$body"
+
+gh pr create --base "$base" --head "$branch" --title "Release $tag" --body-file "$body"

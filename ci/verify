@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Decides whether this repository is safe to merge. The same command runs on a laptop and in the
+# `Verify` workflow, so a pull request fails in CI for exactly the reasons it would fail here.
+#
+#   ci/verify          the whole Gradle build: formatting, compilation, every test the host can run
+#   ci/verify apple    the Apple targets alone: compile iosArm64, run the iosSimulatorArm64 tests
+#
+# `./gradlew build` builds the Apple targets only on macOS; everywhere else Kotlin skips them. The
+# tests of server-sdk and samples/ledger-server start PostgreSQL through Testcontainers, so a Docker
+# daemon has to be running — which is what the macOS runners do not have. CI therefore runs the
+# first form on Linux and the second on macOS, side by side, for every pull request. On a Mac with
+# Docker, the first form alone covers both.
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+case "${1:-all}" in
+    all)
+        echo "==> ./gradlew build"
+        ./gradlew build
+        ;;
+    apple)
+        # Unqualified task names run in every project that has them: the SDK, the protocol and the
+        # sample's shared module alike.
+        echo "==> Apple targets"
+        ./gradlew compileKotlinIosArm64 iosSimulatorArm64Test
+        ;;
+    *)
+        echo "usage: ci/verify [apple]" >&2
+        exit 2
+        ;;
+esac

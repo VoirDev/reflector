@@ -1,7 +1,6 @@
 package dev.voir.reflector.sync.engine
 
 import dev.voir.reflector.sync.core.ScopeState
-import dev.voir.reflector.sync.core.transport.NetworkAvailability
 import dev.voir.reflector.sync.core.SyncFailure
 import dev.voir.reflector.sync.core.SyncPhase
 import dev.voir.reflector.sync.core.adapter.CollectionAdapter
@@ -16,6 +15,7 @@ import dev.voir.reflector.sync.core.metrics.SyncMetricEvent
 import dev.voir.reflector.sync.core.metrics.SyncMetrics
 import dev.voir.reflector.sync.core.metrics.emit
 import dev.voir.reflector.sync.core.transport.BlobTransport
+import dev.voir.reflector.sync.core.transport.NetworkAvailability
 import dev.voir.reflector.sync.core.transport.SyncTransport
 import dev.voir.reflector.sync.core.transport.SyncTransportFailure
 import dev.voir.reflector.sync.engine.blob.BlobReconciler
@@ -240,13 +240,17 @@ internal class CollectionWorker(
         }
         when (val outcome = pull.pull()) {
             is PullOutcome.Interrupted -> return interrupt(outcome.failure)
+
             PullOutcome.ResetRequired -> return resetToServer(bootstrap)
+
             PullOutcome.BootstrapRequired -> if (!bootstrap(bootstrap)) return
+
             // The cycle's one reliable report of whether the server is reachable. A push that
             // fails schedules its own retry and says nothing about the scope, and the limits are
             // read once and cached, so without this a device that lost its connection after the
             // first cycle stayed "online" until it was restarted.
             is PullOutcome.Blocked -> recordFailure(outcome.failure)
+
             PullOutcome.UpToDate -> lastFailure.value = null
         }
         offerConflicts()

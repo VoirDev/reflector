@@ -6,8 +6,8 @@
 # goes out is exactly the source on the default branch. What is not repeated is the verification:
 # when the release pull request's checks ran on the tree the merged commit has, they speak for it.
 # When they cannot — the pull request skipped its checks, their artifacts expired, or the default
-# branch moved after they ran — the merged commit is verified here in full, on Linux and on macOS,
-# before anything is published.
+# branch moved after they ran — the merged commit is verified here in full, on Linux and on macOS as
+# Verify does, before anything is published.
 #
 # The tag is created last, after every package, because it is what marks a release complete. Every
 # job is safe to rerun: a package already published from the same source is not published again, a

@@ -7,12 +7,12 @@ The two specifications in [`docs/`](docs/) are the source of truth for the mecha
 holds work that is understood and not yet done; when an item is finished it leaves the file, and
 whatever reasoning is worth keeping moves into the specification it belongs to.
 
-**Suggested order:** 4 → 3 → 5 → 1 → 2. The first is half an hour, and continuous integration now
+**Suggested order:** 3 → 4 → 1 → 2. The first is half an hour, and continuous integration now
 runs the test it is about on every pull request, so until it is done the first thing CI teaches
-everybody is to re-run a red build. The second closes the gap CI leaves on the iOS targets between
-releases. The third is the other half of the platform integration, where Room on the main thread is
-the part nothing has tried. The fourth is the search that would look for what the scripted tests do
-not think to ask. The last matters only once somebody outside the organisation needs the library.
+everybody is to re-run a red build. The second is the other half of the platform integration, where
+Room on the main thread is the part nothing has tried. The third is the search that would look for
+what the scripted tests do not think to ask. The last matters only once somebody outside the
+organisation needs the library.
 
 ---
 
@@ -44,17 +44,7 @@ Central rejects a POM without them, and the repository has no licence. Signing k
 belong to the same step. None of it is invented on the way past: a POM is the wrong place to guess
 at a licence. The `scm` block and the URL are already there.
 
-## 3. The Apple targets are verified only for a release
-
-`Verify` runs on Linux, where Kotlin skips the iOS targets, because macOS runners cost ten times as
-much on a private repository and have no Docker for the server tests. The iOS compilation and the
-simulator tests run only in a release pull request's `Build release artifacts`, so an ordinary pull
-request can break them and nobody hears of it until the next release is prepared.
-
-**Leaning.** A scheduled workflow running `ci/verify apple` on `main` every night, which is the usual
-compromise: a break is found within a day and charged once, rather than on every commit.
-
-## 4. The client's flakiest test is a wall-clock race
+## 3. The client's flakiest test is a wall-clock race
 
 `SyncEngineTest > refused credentials are reported as needing the user` waits ten seconds of real
 time for a published state, and under a full parallel build it has twice reached that ceiling —
@@ -70,7 +60,7 @@ deadline is waiting for the thing it is about.
 is no longer an eyebrow on a developer's machine but a build that fails for nobody's reason on
 somebody else's commit.
 
-## 5. No iOS sample application
+## 4. No iOS sample application
 
 `samples/ledger/android` covers the Android half — the database file, the OkHttp engine, the three
 platform triggers and enough user interface to see the collection's state — and was run on an
@@ -85,7 +75,7 @@ Files need nothing platform-specific for it — `LedgerFiles` is written against
 camera roll is exactly the case where a device's own storage rules bite, and nothing has tried that
 either.
 
-## 6. detekt is not enabled
+## 5. detekt is not enabled
 
 The stable 1.23.x branch is compiled against Kotlin 2.0.21; the 2.0 branch (group `dev.detekt`) is
 built against 2.4.10 but still in alpha. The version is already in the catalogue.

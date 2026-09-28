@@ -8,8 +8,8 @@
 # `./gradlew build` builds the Apple targets only on macOS; everywhere else Kotlin skips them. The
 # tests of server-sdk and samples/ledger-server start PostgreSQL through Testcontainers, so a Docker
 # daemon has to be running — which is what the macOS runners do not have. CI therefore runs the
-# first form on Linux for every pull request, and the second on macOS for a release, whose
-# artifacts include the iOS libraries. On a Mac with Docker, the first form alone covers both.
+# first form on Linux and the second on macOS, side by side, for every pull request. On a Mac with
+# Docker, the first form alone covers both.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."

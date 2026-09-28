@@ -1,20 +1,21 @@
-# Whether a pull request is safe to merge: the whole Gradle build with its container-backed tests,
-# through `ci/verify`, the same command a developer runs locally. The Voir handbook
-# `github-verify-workflow` is the contract this follows.
+# Whether a pull request is safe to merge. Everything the repository builds is checked through
+# `ci/verify`, the same command a developer runs locally. The Voir handbook `github-verify-workflow`
+# is the contract this follows.
 #
-# It runs on Linux, where Docker is available for the Testcontainers tests and Kotlin skips the
-# Apple targets. Those are built only for a release, on macOS, whose runners cost ten times as much
-# and cannot run the server tests anyway: see `Build release artifacts` below.
+# Two halves, side by side, because no single runner can do both: Linux has Docker for the
+# Testcontainers tests and skips the Apple targets, macOS builds the Apple targets and has no Docker.
+# The job a ruleset requires is the gate at the end, `Build and check whole repository`, whose name
+# never changes when the jobs behind it do.
 #
-# `[skip verify]` in the pull-request body skips every job, which GitHub counts as a pass. It is a
-# reviewer's decision made in the open; removing it runs everything again, since editing the body is
-# one of the triggers.
+# `[skip verify]` in the pull-request body skips every job, the gate included, which GitHub counts
+# as a pass. It is a reviewer's decision made in the open; removing it runs everything again, since
+# editing the body is one of the triggers.
 #
 # A release pull request — `release/vX.Y.Z`, opened by Prepare Release — also runs `Build release
-# artifacts` once the build passes: the Apple targets compiled and tested, and every package in
-# ci/release/packages built at the proposed version into a local Maven repository, kept as this
-# run's `release-packages`. Nothing is published from here. When the merged commit has the tree this
-# run checked, Publish Release takes that as its verification rather than running it all again.
+# artifacts` once the gate passes: every package in ci/release/packages built at the proposed version
+# into a local Maven repository, kept as this run's `release-packages`. Nothing is published from
+# here. When the merged commit has the tree this run checked, Publish Release takes the run as its
+# verification rather than running it all again.
 name: Verify
 
 on:
@@ -35,8 +36,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  verify:
-    name: Build and check whole repository
+  gradle:
+    name: Gradle build and tests
     if: ${{ !contains(github.event.pull_request.body || '', '[skip verify]') }}
     runs-on: ubuntu-latest
     # Testcontainers starts PostgreSQL for server-sdk and the reference host, and the build covers
@@ -56,7 +57,7 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6
 
-      - name: Verify
+      - name: Verify the Gradle build
         run: ci/verify
 
       - name: Keep test reports
@@ -67,6 +68,62 @@ jobs:
           path: "**/build/reports/tests/"
           retention-days: 7
 
+  apple:
+    name: Apple targets
+    if: ${{ !contains(github.event.pull_request.body || '', '[skip verify]') }}
+    runs-on: macos-latest
+    # Kotlin/Native downloads its toolchain on a cold cache and links a test binary per module.
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Verify the Apple targets
+        run: ci/verify apple
+
+      - name: Keep test reports
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: apple-test-reports
+          path: "**/build/reports/tests/"
+          retention-days: 7
+
+  verify:
+    name: Build and check whole repository
+    needs:
+      - gradle
+      - apple
+    # always(), so a failed job still reaches this gate and fails it, rather than leaving the
+    # required check skipped — which GitHub would count as a pass.
+    if: ${{ always() && !contains(github.event.pull_request.body || '', '[skip verify]') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Require every job to have passed
+        env:
+          GRADLE: ${{ needs.gradle.result }}
+          APPLE: ${{ needs.apple.result }}
+        run: |
+          set -euo pipefail
+          echo "Gradle build and tests: $GRADLE"
+          echo "Apple targets:          $APPLE"
+          if [ "$GRADLE" != "success" ] || [ "$APPLE" != "success" ]; then
+            echo "::error::Verification did not pass"
+            exit 1
+          fi
+
   release-artifacts:
     name: Build release artifacts
     needs: verify
@@ -76,12 +133,12 @@ jobs:
       startsWith(github.event.pull_request.head.ref, 'release/v') &&
       github.event.pull_request.head.repo.full_name == github.repository &&
       !contains(github.event.pull_request.body || '', '[skip verify]')
-    # The iOS libraries can only be built here, and their simulator tests only run here.
+    # The iOS libraries among the packages can only be built here.
     runs-on: macos-latest
-    timeout-minutes: 60
+    timeout-minutes: 45
 
     steps:
-      # The pull request merged into its base, as the Linux job tested it — the tree a merge would
+      # The pull request merged into its base, as the jobs above tested it — the tree a merge would
       # make. Publication counts this run as its verification only if the merged commit has exactly
       # this tree.
       - name: Checkout
@@ -102,9 +159,6 @@ jobs:
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6
-
-      - name: Verify the Apple targets
-        run: ci/verify apple
 
       # Publishes nothing: this job has no credential that could.
       - name: Build every release package
@@ -128,11 +182,3 @@ jobs:
           # again from the merged commit instead.
           retention-days: 14
           if-no-files-found: error
-
-      - name: Keep test reports
-        if: ${{ failure() }}
-        uses: actions/upload-artifact@v7
-        with:
-          name: apple-test-reports
-          path: "**/build/reports/tests/"
-          retention-days: 7

@@ -355,11 +355,12 @@ Three workflows under [`.github/workflows`](.github/workflows), following the ha
 `github-verify-workflow` and `github-release-workflow`, with the logic in [`ci/`](ci) so that it
 runs the same on a laptop:
 
-- **Verify** runs `ci/verify` on Linux for every pull request into `main`; its
-  `Build and check whole repository` is the check to require. The Apple targets are not built there:
-  macOS runners cost ten times as much and have no Docker for the server tests. On a release pull
-  request, `Build release artifacts` then runs on macOS — `ci/verify apple`, and every package built
-  at the proposed version without being published.
+- **Verify** runs on every pull request into `main`: `ci/verify` on Linux, which has Docker for the
+  server tests, and `ci/verify apple` on macOS, side by side. `Build and check whole repository`
+  gates both and is the check to require. On a release pull request, `Build release artifacts` then
+  builds every package at the proposed version on macOS, without publishing it.
+- **Dependabot** opens weekly update pull requests for the Gradle build and the actions, grouped so
+  that dependencies which only work together — Kotlin, KSP and AGP among them — move together.
 - **Prepare Release**, run by hand from `main`, bumps `VERSION` (or takes an exact version) and opens
   `Release vX.Y.Z` from `release/vX.Y.Z`.
 - **Publish Release** runs when that pull request is merged: it verifies the merged commit unless the
@@ -404,4 +405,4 @@ compatibility matrix, even though newer Gradle and AGP releases exist.
 
 Static analysis is limited to formatting: detekt's stable 1.23.x is built against Kotlin 2.0.21, and
 the 2.0 branch (group `dev.detekt`, built against 2.4.10) is still in alpha. The version is in the
-catalogue, ready to be switched on — [TODO.md](TODO.md) §6.
+catalogue, ready to be switched on — [TODO.md](TODO.md) §5.

@@ -17,6 +17,7 @@ docs/
   sync-files-design.md       File specification: blobs, references, and who owns the bytes
 .claude/settings.json        Enables the `handbooks` plugin, which carries the engineering standard
 .github/workflows/           Verify, Prepare Release and Publish Release
+.github/dependabot.yml       Weekly, grouped dependency updates for Gradle and the actions
 ci/
   verify                     What a pull request must pass; the same command locally and in CI
   release/                   The release scripts, and `packages`, the inventory of what is published

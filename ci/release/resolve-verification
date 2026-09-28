@@ -10,10 +10,10 @@
 #   MERGE_SHA           the commit the merge made on the default branch
 #   RELEASE_VERSION     the version being released
 #
-# A successful Verify run is one where `Build and check whole repository` passed on Linux and
-# `Build release artifacts` compiled and tested the Apple targets and built every package on macOS,
-# all on one checkout — the pull request merged into its base as it stood then. Its manifest records
-# that checkout's tree; if the merged commit has the same tree, the source was verified in full.
+# A successful Verify run is one where the Gradle build passed on Linux, the Apple targets on macOS,
+# and `Build release artifacts` built every package, all on one checkout — the pull request merged
+# into its base as it stood then. Its manifest records that checkout's tree; if the merged commit
+# has the same tree, the source was verified in full.
 #
 # Writes `verified` — `true`, or `false` when nothing qualifies: the pull request skipped its checks,
 # its artifacts expired, or the default branch moved after they ran. Publication then verifies the

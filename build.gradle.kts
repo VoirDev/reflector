@@ -1,4 +1,3 @@
-import com.diffplug.gradle.spotless.SpotlessExtension
 import org.gradle.api.plugins.JavaPluginExtension
 import org.gradle.api.publish.PublishingExtension
 import org.gradle.api.publish.maven.MavenPublication
@@ -16,7 +15,6 @@ plugins {
     alias(libs.plugins.ksp) apply false
     alias(libs.plugins.room) apply false
     alias(libs.plugins.serialization) apply false
-    alias(libs.plugins.spotless) apply false
 }
 
 val projectVersion =
@@ -51,7 +49,6 @@ val jvmToolchainVersion =
     libs.versions.jvmToolchain
         .get()
         .toInt()
-val ktlintVersion = libs.versions.ktlint.get()
 val warningsAsErrors = providers.gradleProperty("reflector.warningsAsErrors").orNull.toBoolean()
 
 /**
@@ -75,33 +72,6 @@ fun KotlinCommonCompilerOptions.applyRepositoryDefaults(warningsAsErrors: Boolea
 }
 
 allprojects {
-    // Intermediate projects such as `:samples:ledger` have no sources of their own: they have
-    // no build file and exist only as containers for nested modules. On such a project Spotless
-    // walks the whole tree including the children's `build/` directories and fails on the first
-    // unreadable artifact (klib, linkdata), so only real modules are formatted.
-    if (!buildFile.exists()) {
-        return@allprojects
-    }
-
-    apply(plugin = "com.diffplug.spotless")
-
-    extensions.configure<SpotlessExtension> {
-        kotlin {
-            // The tree starts at `src` rather than at the project root with `build/` excluded:
-            // in the latter case Spotless still walks the build directories and fails on the
-            // artifacts KSP and Kotlin/Native create and delete as they go
-            // (klib, linkdata, generated/ksp).
-            target(fileTree("src") { include("**/*.kt") })
-            ktlint(ktlintVersion)
-            trimTrailingWhitespace()
-            endWithNewline()
-        }
-        kotlinGradle {
-            target("*.gradle.kts", "src/**/*.gradle.kts")
-            ktlint(ktlintVersion)
-        }
-    }
-
     plugins.withId("org.jetbrains.kotlin.jvm") {
         extensions.configure<KotlinJvmProjectExtension> {
             jvmToolchain(jvmToolchainVersion)

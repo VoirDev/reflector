@@ -422,6 +422,25 @@ class SyncEngineTest {
         }
 
     @Test
+    fun `a snapshot that stopped part-way is resumed rather than taken for a live collection`() =
+        runBlocking<Unit> {
+            var attempts = 0
+            transport.onSnapshot = {
+                if (attempts++ == 0) throw SyncTransportFailure.Unreachable("the connection dropped")
+                emptySnapshot()
+            }
+            val collection = engine(workers).scope(scopeId).collection(ledger)
+            awaitRecord("the dropped transfer") { it.event == SyncLogEvent.REQUEST_FAILED }
+
+            // The collection is left mid-bootstrap, with no cursor. The next cycle used to pull from
+            // that non-position, hear that there was nothing new, and stay in BOOTSTRAPPING for good
+            // — clearing whatever failure the interrupted transfer had reported on the way.
+            collection.requestSync()
+            collection.state.await("a live collection") { it.phase == SyncPhase.LIVE }
+            assertEquals(2, attempts, "the transfer was attempted again")
+        }
+
+    @Test
     fun `a fault in the application's own code arrives with the throwable that caused it`() =
         runBlocking<Unit> {
             transport.onSnapshot = { emptySnapshot() }

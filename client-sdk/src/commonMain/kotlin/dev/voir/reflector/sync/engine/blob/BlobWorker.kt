@@ -22,7 +22,11 @@ import dev.voir.reflector.sync.protocol.blob.BlobDescriptor
 import dev.voir.reflector.sync.protocol.blob.BlobState
 import dev.voir.reflector.sync.protocol.config.BlobLimits
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.launch
 import kotlin.time.Clock
 
@@ -73,6 +77,7 @@ internal class BlobWorker(
     private val backoff: BackoffPolicy = BackoffPolicy(),
     private val maxAttempts: Int = DEFAULT_MAX_ATTEMPTS,
 ) {
+    /** Pending requests to look for work; conflated, since one pass answers any number of them. */
     private val requests = Channel<Unit>(Channel.CONFLATED)
 
     /** Starts the loop. Cancelling the coroutine scope stops it. */
@@ -111,6 +116,11 @@ internal class BlobWorker(
         }
     }
 
+    /**
+     * Sends the next few files that are due.
+     *
+     * @return `true` when there was anything to send, so that the caller looks again.
+     */
     private suspend fun uploadBatch(): Boolean {
         val waiting = waiting(BlobTransferState.LOCAL) + waiting(BlobTransferState.UPLOADING)
         if (waiting.isEmpty()) {
@@ -120,6 +130,11 @@ internal class BlobWorker(
         return true
     }
 
+    /**
+     * Fetches the next few files that are due.
+     *
+     * @return `true` when there was anything to fetch, so that the caller looks again.
+     */
     private suspend fun downloadBatch(): Boolean {
         val waiting = waiting(BlobTransferState.REMOTE) + waiting(BlobTransferState.DOWNLOADING)
         if (waiting.isEmpty()) {
@@ -129,6 +144,12 @@ internal class BlobWorker(
         return true
     }
 
+    /**
+     * Reads the files in one state whose backoff has expired.
+     *
+     * @param state State to look in.
+     * @return At most [CONCURRENCY] files that may be moved now.
+     */
     private suspend fun waiting(state: BlobTransferState): List<BlobRecord> =
         transactions.transaction {
             stores.blobs.waiting(scope, collection, state, clock.now().toEpochMilliseconds(), CONCURRENCY)
@@ -185,19 +206,16 @@ internal class BlobWorker(
             onProgressed()
             val ticket = registration.upload
             if (ticket != null) {
-                transport.upload(ticket, blobStore.read(record.blobId), stat) { moved ->
-                    // Best effort and deliberately not awaited: progress is for a spinner, and a
-                    // transfer must not be slowed by the reporting of it.
-                    coroutineScope.launch {
-                        transactions.transaction {
-                            stores.blobs.setTransferred(scope, collection, record.blobId, moved)
-                        }
-                    }
+                reportingProgress(record.blobId) { onProgress ->
+                    transport.upload(ticket, blobStore.read(record.blobId), stat, onProgress)
                 }
                 transport.complete(scope, collection, record.blobId)
             }
             transactions.transaction {
                 stores.blobs.setState(scope, collection, record.blobId, BlobTransferState.UPLOADED)
+                // Written with the state rather than left to the last progress report: moving to a
+                // new state resets the figure, and a finished file has to read as all of it.
+                stores.blobs.setTransferred(scope, collection, record.blobId, stat.size)
             }
             log.debug(
                 SyncLogEvent.BLOB_UPLOADED,
@@ -242,12 +260,8 @@ internal class BlobWorker(
                 stores.blobs.setState(scope, collection, record.blobId, BlobTransferState.DOWNLOADING)
             }
             val written =
-                transport.download(ticket, blobStore.write(record.blobId, stat)) { moved ->
-                    coroutineScope.launch {
-                        transactions.transaction {
-                            stores.blobs.setTransferred(scope, collection, record.blobId, moved)
-                        }
-                    }
+                reportingProgress(record.blobId) { onProgress ->
+                    transport.download(ticket, blobStore.write(record.blobId, stat), onProgress)
                 }
             val complete = written == stat.size
             // Told before anything else, so that a partial file is discarded rather than left where
@@ -259,6 +273,7 @@ internal class BlobWorker(
             }
             transactions.transaction {
                 stores.blobs.setState(scope, collection, record.blobId, BlobTransferState.READY)
+                stores.blobs.setTransferred(scope, collection, record.blobId, written)
             }
             log.debug(
                 SyncLogEvent.BLOB_DOWNLOADED,
@@ -276,6 +291,42 @@ internal class BlobWorker(
             retryOrGiveUp(record, failure)
         }
     }
+
+    /**
+     * Runs one transfer while writing its progress to the file's row.
+     *
+     * Progress is written by one coroutine that belongs to the transfer and is stopped before this
+     * returns, so no report can land after whatever the caller writes next. They used to be launched
+     * one per callback and never awaited, which let a stale figure arrive after the file was finished
+     * or after a failed attempt had reset it. Only the latest total is written: progress is for a
+     * spinner, and the transfer must not wait for the reporting of it.
+     *
+     * The last total may never be written. That is deliberate: finishing a transfer writes the final
+     * figure together with the state, and failing one resets it.
+     *
+     * @param blobId File being moved.
+     * @param transfer The transfer, given the callback to report its running total of octets to.
+     * @return What [transfer] returned.
+     * @throws SyncTransportFailure When the transfer could not be completed.
+     */
+    private suspend fun <T> reportingProgress(
+        blobId: BlobId,
+        transfer: suspend (onProgress: (Long) -> Unit) -> T,
+    ): T =
+        coroutineScope {
+            val moved = MutableStateFlow<Long?>(null)
+            val writer =
+                launch {
+                    moved.filterNotNull().collect { total ->
+                        transactions.transaction { stores.blobs.setTransferred(scope, collection, blobId, total) }
+                    }
+                }
+            try {
+                transfer { total -> moved.value = total }
+            } finally {
+                writer.cancelAndJoin()
+            }
+        }
 
     /**
      * Schedules another attempt, or gives up once there have been enough of them.
@@ -297,6 +348,12 @@ internal class BlobWorker(
         schedule(record, failure.message ?: "the transfer did not complete")
     }
 
+    /**
+     * Records a failed attempt and when the next one may start.
+     *
+     * @param record File that failed to move.
+     * @param reason What stopped it, as the application's screen will show it.
+     */
     private suspend fun schedule(
         record: BlobRecord,
         reason: String,
@@ -367,6 +424,7 @@ internal class BlobWorker(
      */
     private suspend fun BlobStore.statOrNull(blobId: BlobId): BlobStat? = runCatching { stat(blobId) }.getOrNull()
 
+    /** Tuning of the worker that is not the application's to choose. */
     private companion object {
         /** Transfers running at once. Two keeps a connection busy without monopolising a phone's. */
         const val CONCURRENCY = 2

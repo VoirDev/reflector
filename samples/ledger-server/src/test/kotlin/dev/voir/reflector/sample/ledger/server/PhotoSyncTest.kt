@@ -178,6 +178,11 @@ class PhotoSyncTest {
             // must not be held back by bytes: on a poor connection those are the difference between
             // a wallet appearing in a second and appearing in a minute.
             await("the wallet arriving", first, second) { second.database.ledgerDao().wallet(walletId) != null }
+            // Waited for rather than read. The pull writes the wallet and its reference in one
+            // transaction, but the file's own state is recorded by reconciliation just after it,
+            // outside the transaction — so for a moment the wallet is here and the file is not yet
+            // described. Read in that moment, this was `null`.
+            await("the photograph being described", first, second) { second.handle.blob(photo).first() != null }
             val state = assertNotNull(second.handle.blob(photo).first())
             assertTrue(
                 state.state == BlobTransferState.REMOTE ||

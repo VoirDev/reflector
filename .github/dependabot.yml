@@ -43,9 +43,6 @@ updates:
           - "org.junit*"
           - "org.testcontainers*"
           - "app.cash.turbine*"
-      formatting:
-        patterns:
-          - "com.diffplug.spotless*"
 
   - package-ecosystem: github-actions
     directory: /

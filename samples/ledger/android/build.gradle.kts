@@ -4,7 +4,7 @@ plugins {
 }
 
 // A deliberately thin application: it exists so that the platform integration described in
-// EXAMPLE.md is executed rather than only compiled. Everything about the data lives in the shared
+// docs/client-guide.md is executed rather than only compiled. Everything about the data lives in the shared
 // module; what is here is the part that can only be written against Android.
 android {
     namespace = "dev.voir.reflector.sample.ledger.android"

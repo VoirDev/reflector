@@ -480,9 +480,23 @@ internal class CollectionWorker(
         }
     }
 
+    /**
+     * Decides whether this cycle has to transfer a snapshot before anything else.
+     *
+     * A collection left in [SyncPhase.BOOTSTRAPPING] is one whose transfer stopped part-way — a
+     * refused request, a dropped connection, a restart — and it has no cursor to pull from yet. It
+     * used to be treated as live: the next cycle pulled from no position at all, found nothing,
+     * and reported the collection as up to date while it was still empty. The transfer is resumed
+     * instead, from the page it had reached.
+     *
+     * @return `true` when the collection has no usable position in the change log.
+     */
     private suspend fun needsBootstrap(): Boolean {
         val state = transactions.transaction { stores.collections.ensure(scope, collection) }
-        return state.phase == SyncPhase.NEW || state.phase == SyncPhase.RESYNC_REQUIRED
+        return when (state.phase) {
+            SyncPhase.NEW, SyncPhase.BOOTSTRAPPING, SyncPhase.RESYNC_REQUIRED -> true
+            SyncPhase.LIVE, SyncPhase.NEEDS_ATTENTION -> false
+        }
     }
 
     private suspend fun bootstrap(coordinator: BootstrapCoordinator): Boolean =

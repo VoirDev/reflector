@@ -163,7 +163,9 @@ class TwoClientConvergenceTest {
 
             assertEquals("Agreed name", assertNotNull(a.wallet()).title)
             assertEquals("Agreed name", assertNotNull(b.wallet()).title)
-            assertEquals(0, b.collection.state.value.conflictCount)
+            // From the conflicts rather than the published count, for the reason given in the test
+            // below: the count trails the transaction that resolved the conflict.
+            assertEquals(emptyList(), b.collection.conflicts.first())
         }
 
     @Test
@@ -193,7 +195,11 @@ class TwoClientConvergenceTest {
                 b.transaction()?.amountMinor == 700L
             }
 
-            assertEquals(0, b.collection.state.value.conflictCount, "the adapter decided, so nobody is asked")
+            // Read from the conflicts themselves rather than from the published state. The adapter's
+            // decision and the amount it wrote land in one transaction, but `conflictCount` reaches
+            // the state through a Room flow that emits after it — read straight after the amount,
+            // it could still show the conflict that had just been decided.
+            assertEquals(emptyList(), b.collection.conflicts.first(), "the adapter decided, so nobody is asked")
             assertEquals(assertNotNull(a.transaction()).amountMinor, assertNotNull(b.transaction()).amountMinor)
             assertEquals(assertNotNull(a.transaction()).comment, assertNotNull(b.transaction()).comment)
         }

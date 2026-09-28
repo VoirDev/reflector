@@ -159,6 +159,14 @@ class BlobWorkerTest {
     @Test
     fun `what a screen draws follows the file rather than the record`() =
         runBlocking<Unit> {
+            // The upload does not return until its progress has reached the row. That is the order
+            // in which finishing the file used to reset the figure to zero, and it used to happen
+            // only when the progress write won a race — so the test passed or failed by timing.
+            blobs.afterUploadProgress = {
+                await("the progress reaching the row") {
+                    transactions.transaction { stores.blobs.find(scopeId, ledger, photo)?.transferred } == SIZE
+                }
+            }
             val handle = collection()
             attach()
 

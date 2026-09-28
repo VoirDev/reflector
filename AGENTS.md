@@ -8,10 +8,17 @@ implemented and covered by tests; what is known to be missing is collected in
 ## Repository layout
 
 ```text
-README.md                    How the system works and which problems it solves
-EXAMPLE.md                   Step-by-step integration of the server and the client
+README.md                    The public front page: principles, installation, quick start
 TODO.md                      Work that is known and not yet done
 docs/
+  README.md                  Index of the documentation
+  concepts.md                How it works: the mechanism and the reasoning behind each choice
+  server-guide.md            Integrating the server module, step by step
+  client-guide.md            Integrating the client SDK, step by step
+  files-guide.md             Integrating file synchronisation, on both sides
+  protocol.md                Endpoints, status codes and the rules a server must honour
+  testing.md                 Testing an integration
+  development.md             Building this repository, CI and releases
   sync-client-design.md      Client library specification
   sync-server-design.md      Server module specification
   sync-files-design.md       File specification: blobs, references, and who owns the bytes
@@ -67,8 +74,9 @@ Before any change to Kotlin code, invoke in this order:
    example — `kotlin-style` and this repository's own rules are the whole of the standard. That is
    a real answer, not a gap to be filled by guessing at a convention.
 
-The versions line up rather than being assumed to: this repository builds on Kotlin 2.4.10 and
-Exposed 1.5.0, which is what `kotlin-style` and `exposed-v1-5` are written against. When a
+The versions line up rather than being assumed to: this repository builds on Kotlin 2.4.20 and
+Exposed 1.5.0, inside what `kotlin-style` (Kotlin 2.4+) and `exposed-v1-5` (Exposed 1.5) are
+written against. When a
 dependency in [`gradle/libs.versions.toml`](gradle/libs.versions.toml) moves past what a skill
 states it was validated for, that is a conflict to raise rather than to assume away.
 
@@ -149,8 +157,6 @@ the rules for transactions and the requirements for migrations.
 
 ```bash
 ./gradlew build            # build and test every module
-./gradlew spotlessApply    # format (ktlint via Spotless)
-./gradlew spotlessCheck    # verify formatting
 ```
 
 Build configuration:
@@ -158,7 +164,7 @@ Build configuration:
 - versions only through `gradle/libs.versions.toml`, no string coordinates in modules;
 - plugins are applied in modules through catalogue aliases (`alias(libs.plugins.kotlinJvm)`)
   and declared once in the root `build.gradle.kts` with `apply false`;
-- settings shared by modules (toolchain, compiler options, Spotless, JUnit Platform) live in
+- settings shared by modules (toolchain, compiler options, JUnit Platform) live in
   the `allprojects` block of the root `build.gradle.kts`, via `plugins.withId`; the repository
   has no separate included build with convention plugins;
 - dependencies between modules go through typesafe accessors (`projects.clientSdk`);
@@ -182,3 +188,6 @@ return type. The samples in `samples/` deliberately do not enable it.
 - The whole repository is in English: code, KDoc, names, comments, commit messages,
   project documents and specifications.
 - Branches and commits describe a change in behaviour, not files.
+- The README is the public front page and stays short; detail belongs in `docs/`. A change to the
+  public API updates the guides in `docs/` — and the README's quick start, when it is affected — in
+  the same change.

@@ -43,6 +43,11 @@ public interface CollectionHandle {
      * @param id File to observe.
      * @return Progress of the file, or `null` while the library knows nothing about it — which is
      *   the state before any document has been seen to name it, and after it has been let go of.
+     *   There is also a brief `null` right after a pulled document first names a file: the document
+     *   and its reference are applied in one transaction, but whether this device already holds
+     *   the bytes is asked of the application's store only afterwards, and the file is described
+     *   once that answer is in. A screen that draws `null` as "no file yet" is right for that
+     *   moment too.
      */
     public fun blob(id: BlobId): Flow<BlobSyncState?>
 

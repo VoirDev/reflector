@@ -53,6 +53,14 @@ class FakeBlobTransport : BlobTransport {
      */
     var holdUploads: Boolean = false
 
+    /**
+     * Runs after an upload has reported its progress and before it returns.
+     *
+     * Lets a test hold the transfer open until something the report caused has happened, which is
+     * how it fixes an order the worker's coroutines would otherwise leave to chance.
+     */
+    var afterUploadProgress: suspend () -> Unit = {}
+
     /** Octets the next download will actually produce, or `null` to produce the declared size. */
     var shortenDownloadTo: Long? = null
 
@@ -114,6 +122,7 @@ class FakeBlobTransport : BlobTransport {
             throw SyncTransportFailure.Unreachable("the bytes are being held back")
         }
         onProgress(stat.size)
+        afterUploadProgress()
     }
 
     override suspend fun download(

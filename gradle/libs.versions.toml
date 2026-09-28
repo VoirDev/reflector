@@ -31,7 +31,7 @@ exposed = "1.5.0"
 flyway = "13.5.0"
 # The reference host's logging backend. Nothing in server-sdk depends on it: the module reports
 # through its own SyncLog port, and this is what the sample's ten-line adapter writes into.
-logback = "1.5.20"
+logback = "1.6.4"
 postgresql = "42.7.13"
 hikari = "7.1.0"
 

@@ -1,11 +1,9 @@
 #!/usr/bin/env bash
 # Checks the repository under build/release against its manifest and against the release it is
-# about to be published for: the right version, every artifact in the inventory and no other, each
-# POM the one that was built and naming the manifest's revision, and — when EXPECTED_TREE is set —
-# built from exactly that tree.
+# about to be published for: the right version, every artifact in the inventory and no other, and
+# each POM the one that was built and naming the manifest's revision.
 #
 #   EXPECTED_VERSION   the version being released
-#   EXPECTED_TREE      the tree the packages must have been built from, when the caller knows it
 #
 # Exits non-zero, saying why, on the first thing that does not match.
 source "$(dirname "$0")/common.sh"
@@ -21,12 +19,6 @@ version="$(field version)"
 revision="$(field revision)"
 [ "$version" = "${EXPECTED_VERSION:?EXPECTED_VERSION is required}" ] \
     || fail "The packages are for version '$version', not $EXPECTED_VERSION"
-
-if [ -n "${EXPECTED_TREE:-}" ]; then
-    tree="$(field tree)"
-    [ "$tree" = "$EXPECTED_TREE" ] \
-        || fail "The packages were built from tree $tree, not $EXPECTED_TREE"
-fi
 
 expected="$(packages | awk '{ print $1 }' | sort)"
 listed="$(awk '$1 == "package" { print $2 }' "$manifest" | sort)"

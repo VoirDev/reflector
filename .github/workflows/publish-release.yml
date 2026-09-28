@@ -1,17 +1,15 @@
-# Publishes a release once its pull request is merged: every package in ci/release/packages to
-# GitHub Packages at the version in VERSION, then the `vX.Y.Z` tag and a GitHub Release with
-# generated notes. The Voir handbook `github-release-workflow` is the contract this follows.
+# Publishes a release once its pull request is merged, in a straight line: build every package in
+# ci/release/packages from the merged commit and publish it to GitHub Packages, then tag `vX.Y.Z` and
+# write the GitHub Release. The Voir handbook `github-release-workflow` is the contract this follows.
 #
-# The packages are built here, from the merged commit, in the job that publishes them — so what
-# goes out is exactly the source on the default branch. What is not repeated is the verification:
-# when the release pull request's checks ran on the tree the merged commit has, they speak for it.
-# When they cannot — the pull request skipped its checks, their artifacts expired, or the default
-# branch moved after they ran — the merged commit is verified here in full, on Linux and on macOS as
-# Verify does, before anything is published.
+# Nothing is verified again here. The release pull request is where that happens: Verify tests it and
+# `Build release artifacts` builds every package at the proposed version, and the ruleset on main
+# will not merge it otherwise.
 #
-# The tag is created last, after every package, because it is what marks a release complete. Every
-# job is safe to rerun: a package already published from the same source is not published again, a
-# tag already at the merged commit is kept, and nothing published is ever overwritten.
+# The tag comes after the packages, because it is what marks a release complete: a release whose
+# packages did not all make it has no tag, and rerunning the workflow carries on from there. A
+# package already published from the same source is not published again, and a tag already at the
+# merged commit is kept.
 name: Publish Release
 
 on:
@@ -30,19 +28,26 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  detect:
-    name: Detect release
+  publish:
+    name: Publish packages
     if: >-
       github.event.pull_request.merged == true &&
       startsWith(github.event.pull_request.head.ref, 'release/v')
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # The iOS libraries among the packages can only be built on macOS.
+    runs-on: macos-latest
+    timeout-minutes: 45
+    # Required reviewers on this environment, when it has any, are the last human gate before
+    # anything is published. Without them it passes straight through.
+    environment: release
+    permissions:
+      contents: read
+      packages: write
     outputs:
       version: ${{ steps.release.outputs.version }}
-      tag: ${{ steps.release.outputs.tag }}
-      should_publish: ${{ steps.release.outputs.should_publish }}
 
     steps:
+      # Every commit and tag: detect looks for the release tag, and publication compares a POM
+      # already published with the commit it names.
       - name: Checkout merged commit
         uses: actions/checkout@v7
         with:
@@ -57,134 +62,8 @@ jobs:
           MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
         run: ci/release/detect
 
-  resolve:
-    name: Find the release pull request's verification
-    needs: detect
-    if: needs.detect.outputs.should_publish == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: read
-      # Reading the release pull request's artifacts.
-      actions: read
-    outputs:
-      verified: ${{ steps.resolve.outputs.verified }}
-
-    steps:
-      - name: Checkout merged commit
-        uses: actions/checkout@v7
-        with:
-          ref: ${{ github.event.pull_request.merge_commit_sha }}
-
-      - name: Look for a check of the merged tree
-        id: resolve
-        env:
-          GH_TOKEN: ${{ github.token }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
-          RELEASE_VERSION: ${{ needs.detect.outputs.version }}
-        run: ci/release/resolve-verification
-
-  # --- Only when the pull request's checks do not cover the merged commit --------------------------
-
-  verify:
-    name: Verify merged release
-    needs: resolve
-    if: needs.resolve.outputs.verified != 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-
-    steps:
-      - name: Checkout merged commit
-        uses: actions/checkout@v7
-        with:
-          ref: ${{ github.event.pull_request.merge_commit_sha }}
-
       - name: Set up Java 21
-        uses: actions/setup-java@v6
-        with:
-          distribution: temurin
-          java-version: "21"
-
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v6
-
-      - name: Verify the merged commit
-        run: ci/verify
-
-  verify-apple:
-    name: Verify merged release on Apple targets
-    needs: resolve
-    if: needs.resolve.outputs.verified != 'true'
-    runs-on: macos-latest
-    timeout-minutes: 45
-
-    steps:
-      - name: Checkout merged commit
-        uses: actions/checkout@v7
-        with:
-          ref: ${{ github.event.pull_request.merge_commit_sha }}
-
-      - name: Set up Java 21
-        uses: actions/setup-java@v6
-        with:
-          distribution: temurin
-          java-version: "21"
-
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v6
-
-      - name: Verify the Apple targets of the merged commit
-        run: ci/verify apple
-
-  # --- Either way ----------------------------------------------------------------------------------
-
-  approval:
-    name: Release approval
-    needs:
-      - detect
-      - resolve
-      - verify
-      - verify-apple
-    # always(), because the verification jobs are skipped when the pull request's checks already
-    # cover the merged commit; what is required is that none of them failed.
-    if: >-
-      always() &&
-      needs.detect.outputs.should_publish == 'true' &&
-      needs.resolve.result == 'success' &&
-      (needs.verify.result == 'success' || needs.verify.result == 'skipped') &&
-      (needs.verify-apple.result == 'success' || needs.verify-apple.result == 'skipped')
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    # Required reviewers on this environment, when it has any, are the last human gate before
-    # anything is published. Without them it passes straight through.
-    environment: release
-
-    steps:
-      - name: Approved
-        run: echo "Release ${{ needs.detect.outputs.tag }} approved for publication."
-
-  publish:
-    name: Publish packages
-    needs:
-      - detect
-      - approval
-    # The iOS libraries among the packages can only be built on macOS.
-    runs-on: macos-latest
-    timeout-minutes: 45
-    permissions:
-      contents: read
-      packages: write
-
-    steps:
-      # Every commit, so that a POM already published names a commit whose tree can be compared.
-      - name: Checkout merged commit
-        uses: actions/checkout@v7
-        with:
-          ref: ${{ github.event.pull_request.merge_commit_sha }}
-          fetch-depth: 0
-
-      - name: Set up Java 21
+        if: steps.release.outputs.should_publish == 'true'
         uses: actions/setup-java@v6
         with:
           distribution: temurin
@@ -192,39 +71,34 @@ jobs:
 
       # No cache: what is published is built from the merged source and nothing else.
       - name: Set up Gradle
+        if: steps.release.outputs.should_publish == 'true'
         uses: gradle/actions/setup-gradle@v6
         with:
           cache-disabled: true
 
-      - name: Build every release package from the merged commit
+      - name: Build every release package
+        if: steps.release.outputs.should_publish == 'true'
         env:
           RELEASE_REVISION: ${{ github.event.pull_request.merge_commit_sha }}
         run: ci/release/build-packages
 
       - name: Check the packages against the release
+        if: steps.release.outputs.should_publish == 'true'
         env:
-          EXPECTED_VERSION: ${{ needs.detect.outputs.version }}
-        run: |
-          set -euo pipefail
-          EXPECTED_TREE="$(git rev-parse 'HEAD^{tree}')" ci/release/check-packages
+          EXPECTED_VERSION: ${{ steps.release.outputs.version }}
+        run: ci/release/check-packages
 
-      - name: Publish every package at its version
+      - name: Publish every package
+        if: steps.release.outputs.should_publish == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           ORG_GRADLE_PROJECT_gitHubPackagesUsername: ${{ github.actor }}
           ORG_GRADLE_PROJECT_gitHubPackagesPassword: ${{ github.token }}
         run: ci/release/publish-packages
 
-  finalize:
+  release:
     name: Create tag and GitHub Release
-    needs:
-      - detect
-      - publish
-    # Also on a rerun that found the tag already in place, to write a GitHub Release that is missing.
-    if: >-
-      always() &&
-      needs.detect.result == 'success' &&
-      (needs.publish.result == 'success' || needs.detect.outputs.should_publish == 'false')
+    needs: publish
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -240,5 +114,5 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
-          RELEASE_VERSION: ${{ needs.detect.outputs.version }}
+          RELEASE_VERSION: ${{ needs.publish.outputs.version }}
         run: ci/release/finalize

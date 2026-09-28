@@ -13,9 +13,9 @@
 #
 # A release pull request — `release/vX.Y.Z`, opened by Prepare Release — also runs `Build release
 # artifacts` once the gate passes: every package in ci/release/packages built at the proposed version
-# into a local Maven repository, kept as this run's `release-packages`. Nothing is published from
-# here. When the merged commit has the tree this run checked, Publish Release takes the run as its
-# verification rather than running it all again.
+# into a local Maven repository, to prove the release can be produced before it is merged. Nothing is
+# published from here; Publish Release builds the packages again from the merged commit and
+# publishes those.
 name: Verify
 
 on:
@@ -127,8 +127,7 @@ jobs:
   release-artifacts:
     name: Build release artifacts
     needs: verify
-    # Only a release branch of this repository. Skipped with the rest by `[skip verify]`, in which
-    # case publication verifies the merged commit itself.
+    # Only a release branch of this repository. Skipped with the rest by `[skip verify]`.
     if: >-
       startsWith(github.event.pull_request.head.ref, 'release/v') &&
       github.event.pull_request.head.repo.full_name == github.repository &&
@@ -139,8 +138,7 @@ jobs:
 
     steps:
       # The pull request merged into its base, as the jobs above tested it — the tree a merge would
-      # make. Publication counts this run as its verification only if the merged commit has exactly
-      # this tree.
+      # make.
       - name: Checkout
         uses: actions/checkout@v7
 
@@ -172,13 +170,3 @@ jobs:
         run: |
           set -euo pipefail
           EXPECTED_VERSION="${EXPECTED_VERSION#release/v}" ci/release/check-packages
-
-      - name: Keep the release packages
-        uses: actions/upload-artifact@v7
-        with:
-          name: release-packages
-          path: build/release/
-          # Long enough for a release pull request to be reviewed. One merged later is verified
-          # again from the merged commit instead.
-          retention-days: 14
-          if-no-files-found: error

@@ -4,13 +4,11 @@
 #
 # The release pull request runs this to prove every package can be produced before anybody merges,
 # and Publish Release runs it again on the merged commit, so what goes out is built from exactly the
-# source on the default branch. The manifest is what lets publication decide whether the pull
-# request's checks still speak for the merged commit:
+# source on the default branch. The manifest says what was built, for check-packages and
+# publish-packages to hold the packages to:
 #
 #   version    the version every package carries
 #   revision   the commit every POM names as `reflector.revision`
-#   tree       the tree of the commit actually built; publication skips verifying the merged commit
-#              again only when its tree is this one
 #   package    one line per artifact: its name and the SHA-256 of its POM
 #
 #   RELEASE_REVISION   the commit to name in the POMs; HEAD when unset
@@ -20,7 +18,6 @@ source "$(dirname "$0")/common.sh"
 
 version="$(read_version)"
 revision="${RELEASE_REVISION:-$(git rev-parse HEAD)}"
-tree="$(git rev-parse 'HEAD^{tree}')"
 
 rm -rf "$BUILD_DIR"
 
@@ -34,7 +31,6 @@ manifest="$BUILD_DIR/manifest"
 {
     echo "version $version"
     echo "revision $revision"
-    echo "tree $tree"
 } > "$manifest"
 
 while read -r artifact _; do

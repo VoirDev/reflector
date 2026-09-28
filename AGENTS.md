@@ -8,10 +8,17 @@ implemented and covered by tests; what is known to be missing is collected in
 ## Repository layout
 
 ```text
-README.md                    How the system works and which problems it solves
-EXAMPLE.md                   Step-by-step integration of the server and the client
+README.md                    The public front page: principles, installation, quick start
 TODO.md                      Work that is known and not yet done
 docs/
+  README.md                  Index of the documentation
+  concepts.md                How it works: the mechanism and the reasoning behind each choice
+  server-guide.md            Integrating the server module, step by step
+  client-guide.md            Integrating the client SDK, step by step
+  files-guide.md             Integrating file synchronisation, on both sides
+  protocol.md                Endpoints, status codes and the rules a server must honour
+  testing.md                 Testing an integration
+  development.md             Building this repository, CI and releases
   sync-client-design.md      Client library specification
   sync-server-design.md      Server module specification
   sync-files-design.md       File specification: blobs, references, and who owns the bytes
@@ -182,3 +189,6 @@ return type. The samples in `samples/` deliberately do not enable it.
 - The whole repository is in English: code, KDoc, names, comments, commit messages,
   project documents and specifications.
 - Branches and commits describe a change in behaviour, not files.
+- The README is the public front page and stays short; detail belongs in `docs/`. A change to the
+  public API updates the guides in `docs/` — and the README's quick start, when it is affected — in
+  the same change.

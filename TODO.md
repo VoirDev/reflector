@@ -3,7 +3,7 @@
 What is known to be missing, with the options considered and where each one leans. Grouped by what
 it costs to leave alone rather than by how much work it is.
 
-The two specifications in [`docs/`](docs/) are the source of truth for the mechanism. This file
+The specifications in [`docs/`](docs/) are the source of truth for the mechanism. This file
 holds work that is understood and not yet done; when an item is finished it leaves the file, and
 whatever reasoning is worth keeping moves into the specification it belongs to.
 

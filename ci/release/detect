@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Decides whether a merged pull request is a release to publish, and which. Run by Publish Release on
+# the merged commit, with every tag.
+#
+#   HEAD_REF            the merged pull request's branch
+#   HEAD_REPOSITORY     the repository that branch lives in
+#   GITHUB_REPOSITORY   this repository
+#   MERGE_SHA           the commit the merge made on the default branch
+#
+# A release is a branch of this repository named `release/vX.Y.Z` whose VERSION, once merged, reads
+# X.Y.Z. Anything else is refused rather than published under a name it does not match.
+#
+# Writes `version`, `tag` and `should_publish`. A tag that already points at the merged commit means
+# the release finished before and this is a rerun: nothing is published again, and only a missing
+# GitHub Release is written. A tag pointing anywhere else is refused, never moved.
+source "$(dirname "$0")/common.sh"
+
+[ "${HEAD_REPOSITORY:-}" = "${GITHUB_REPOSITORY:-}" ] \
+    || fail "A release comes from a branch of $GITHUB_REPOSITORY, not of '$HEAD_REPOSITORY'"
+
+version="$(read_version)"
+tag="v$version"
+[ "${HEAD_REF:-}" = "release/$tag" ] \
+    || fail "The merged branch is '$HEAD_REF', but VERSION reads $version — expected release/$tag"
+
+output version "$version"
+output tag "$tag"
+
+tagged="$(git rev-parse -q --verify "refs/tags/$tag^{commit}" || true)"
+if [ -z "$tagged" ]; then
+    output should_publish true
+elif [ "$tagged" = "${MERGE_SHA:?MERGE_SHA is required}" ]; then
+    echo "::notice::$tag already points at $MERGE_SHA; its packages were published before"
+    output should_publish false
+else
+    fail "$tag already points at $tagged, not the merged $MERGE_SHA; a release tag is never moved"
+fi

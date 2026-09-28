@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+# Publishes every package under build/release to GitHub Packages — unless the registry already holds
+# it at this version. The caller has run build-packages and check-packages on the merged commit.
+#
+# A version is immutable, and GitHub Packages refuses to overwrite one anyway. A version the registry
+# already holds is accepted only when it is complete and its POM names a commit with the merged tree
+# — which is what a rerun after a partial failure finds — and refused otherwise. One that is only
+# partly there, from a publication cut off halfway through, is refused too: Gradle cannot finish it,
+# and deleting a published version is a person's decision, never this script's.
+#
+# The registry is asked through its Maven endpoint, file by file, because the Packages REST API
+# accepts no token a workflow has. A file it does not serve counts as absent whatever the reason; if
+# it was there after all, Gradle's upload is refused with a conflict and the step fails, so a wrong
+# answer can stop a release but never overwrite one.
+#
+#   GH_TOKEN                               a token that may read this repository's packages
+#   GITHUB_ACTOR                           who the token belongs to
+#   ORG_GRADLE_PROJECT_gitHubPackages*     the Username and Password Gradle publishes with
+source "$(dirname "$0")/common.sh"
+
+manifest="$BUILD_DIR/manifest"
+version="$(awk '$1 == "version" { print $2 }' "$manifest")"
+revision="$(awk '$1 == "revision" { print $2 }' "$manifest")"
+[ -n "$version" ] && [ -n "$revision" ] || fail "No version or revision in $manifest"
+tree="$(git rev-parse 'HEAD^{tree}')"
+
+scratch="$(mktemp -d)"
+trap 'rm -rf "$scratch"' EXIT
+
+# Fetches $1 — a path under the registry — into $2, and prints the HTTP status.
+fetch() {
+    curl --silent --show-error --location --output "$2" --write-out '%{http_code}' \
+        --user "${GITHUB_ACTOR:-release}:${GH_TOKEN:?GH_TOKEN is required}" \
+        --retry 3 --retry-delay 5 "$PACKAGES_URL/$1"
+}
+
+# Which of the files build-packages made for artifact $1 the registry serves: prints `none`, `all`
+# or `some <missing files>`, and leaves the ones it fetched under $scratch. Checksums are left out;
+# the registry answers for those itself. A refused credential is not an answer about a file, so it
+# fails — which the caller sees only when it assigns the result, bash 3.2 dropping the status of a
+# substitution used anywhere else.
+published_state() {
+    local dir remote file name status present=0 missing=""
+    dir="$(artifact_dir "$1" "$version")"
+    remote="${GROUP//.//}/$1/$version"
+    for file in "$dir"/*; do
+        name="$(basename "$file")"
+        case "$name" in *.md5 | *.sha1 | *.sha256 | *.sha512) continue ;; esac
+        status="$(fetch "$remote/$name" "$scratch/$name")" || fail "Could not reach GitHub Packages for $remote/$name"
+        case "$status" in
+            200) present=$((present + 1)) ;;
+            401 | 403) fail "GitHub Packages refused the token reading $remote/$name (HTTP $status)" ;;
+            *) missing="$missing $name" ;;
+        esac
+    done
+    if [ "$present" -eq 0 ]; then
+        echo none
+    elif [ -z "$missing" ]; then
+        echo all
+    else
+        echo "some$missing"
+    fi
+}
+
+# Fails unless the POM fetched for artifact $1 names a commit with the merged tree.
+require_same_source() {
+    local published_revision published_tree
+    published_revision="$(pom_revision < "$scratch/$1-$version.pom")"
+    published_tree="$(git rev-parse -q --verify "$published_revision^{tree}" 2> /dev/null || true)"
+    [ -n "$published_tree" ] && [ "$published_tree" = "$tree" ] \
+        || fail "$GROUP:$1:$version is already published from '${published_revision:-an unknown commit}', not from this source; a published version is never overwritten"
+}
+
+tasks=()
+while read -r artifact stem _; do
+    coordinates="$GROUP:$artifact:$version"
+    state="$(published_state "$artifact")"
+    case "$state" in
+        none)
+            echo "$coordinates is not published yet"
+            tasks+=("${stem}ToGitHubPackagesRepository")
+            ;;
+        all)
+            require_same_source "$artifact"
+            echo "$coordinates is already published from this source"
+            ;;
+        *)
+            fail "$coordinates is only partly published (missing:${state#some}). Delete version $version of the package $GROUP.$artifact on GitHub, then rerun this job"
+            ;;
+    esac
+    rm -rf "${scratch:?}"/*
+done < <(packages)
+
+if [ "${#tasks[@]}" -eq 0 ]; then
+    echo "Every package is already published at $version"
+    exit 0
+fi
+
+# The same version and revision as build-packages, so Gradle publishes the artifacts it already
+# built and checked rather than new ones.
+echo "==> Publishing ${#tasks[@]} packages at $version"
+./gradlew "${tasks[@]}" -PreleaseVersion="$version" -PreleaseRevision="$revision"
+
+while read -r artifact _; do
+    state="$(published_state "$artifact")"
+    [ "$state" = all ] \
+        || fail "$GROUP:$artifact:$version was published, but GitHub Packages does not serve all of it"
+    require_same_source "$artifact"
+    rm -rf "${scratch:?}"/*
+done < <(packages)
+
+echo "Every package is published at $version"

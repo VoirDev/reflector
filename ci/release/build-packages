@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# Builds every package in the inventory at the version in VERSION into a Maven repository under
+# build/release/repository, beside a manifest that says what it is. Publishes nothing.
+#
+# The release pull request runs this to prove every package can be produced before anybody merges,
+# and Publish Release runs it again on the merged commit, so what goes out is built from exactly the
+# source on the default branch. The manifest is what lets publication decide whether the pull
+# request's checks still speak for the merged commit:
+#
+#   version    the version every package carries
+#   revision   the commit every POM names as `reflector.revision`
+#   tree       the tree of the commit actually built; publication skips verifying the merged commit
+#              again only when its tree is this one
+#   package    one line per artifact: its name and the SHA-256 of its POM
+#
+#   RELEASE_REVISION   the commit to name in the POMs; HEAD when unset
+#
+# Needs the Apple toolchain for the iOS libraries among them, so it runs on macOS.
+source "$(dirname "$0")/common.sh"
+
+version="$(read_version)"
+revision="${RELEASE_REVISION:-$(git rev-parse HEAD)}"
+tree="$(git rev-parse 'HEAD^{tree}')"
+
+rm -rf "$BUILD_DIR"
+
+# Every publication the build has, not only the inventory's: the unqualified task runs in every
+# project that publishes, so a target or a module added without a line in the inventory lands in
+# the repository and check-packages refuses it, rather than being left out of the release unseen.
+echo "==> Building every publication at $version"
+./gradlew publishAllPublicationsToReleaseRepository -PreleaseVersion="$version" -PreleaseRevision="$revision"
+
+manifest="$BUILD_DIR/manifest"
+{
+    echo "version $version"
+    echo "revision $revision"
+    echo "tree $tree"
+} > "$manifest"
+
+while read -r artifact _; do
+    pom="$(artifact_dir "$artifact" "$version")/$artifact-$version.pom"
+    [ -f "$pom" ] || fail "Building $artifact produced no $pom"
+    echo "package $artifact $(sha256_of "$pom")" >> "$manifest"
+done < <(packages)
+
+echo "==> Built"
+cat "$manifest"

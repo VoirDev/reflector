@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# Marks a release complete: tags the merged commit and writes its GitHub Release. Run by Publish
+# Release only after every package is published, because the tag is the completion marker — a
+# release whose packages did not all make it has no tag, and its rerun carries on.
+#
+#   GH_TOKEN            a token that may write this repository's contents
+#   GITHUB_REPOSITORY   owner/name
+#   MERGE_SHA           the merged commit the packages were verified and built from
+#   RELEASE_VERSION     X.Y.Z
+#
+# Safe to rerun: a tag already at the merged commit is kept, one anywhere else is refused, and a
+# GitHub Release that exists is left as it is.
+source "$(dirname "$0")/common.sh"
+
+repository="${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}"
+merge="${MERGE_SHA:?MERGE_SHA is required}"
+version="${RELEASE_VERSION:?RELEASE_VERSION is required}"
+tag="v$version"
+
+# A failed lookup still prints the error body to stdout, so only a successful one names the commit.
+# Any failure reads as untagged: if the tag does exist after all, creating it is refused below.
+if ! tagged="$(gh api "repos/$repository/git/ref/tags/$tag" --jq .object.sha 2> /dev/null)"; then
+    tagged=""
+fi
+if [ -z "$tagged" ]; then
+    gh api "repos/$repository/git/refs" --method POST -f ref="refs/tags/$tag" -f sha="$merge" > /dev/null
+    echo "Tagged $merge as $tag"
+elif [ "$tagged" = "$merge" ]; then
+    echo "$tag already points at $merge"
+else
+    fail "$tag already points at $tagged, not the merged $merge; a release tag is never moved"
+fi
+
+if gh release view "$tag" --repo "$repository" > /dev/null 2>&1; then
+    echo "The GitHub Release for $tag already exists"
+    exit 0
+fi
+
+notes="$(mktemp)"
+trap 'rm -f "$notes"' EXIT
+{
+    echo "## Packages"
+    echo
+    echo "Published to GitHub Packages, \`$PACKAGES_URL\`:"
+    echo
+    packages | while read -r artifact _ kind; do
+        if [ "$kind" = module ]; then echo "- \`$GROUP:$artifact:$version\`"; fi
+    done
+    echo
+    echo "With their platform variants, which Gradle picks for itself:"
+    packages | while read -r artifact _ kind; do
+        if [ "$kind" = variant ]; then echo "\`$artifact\`"; fi
+    done | paste -sd ' ' -
+    echo
+    gh api "repos/$repository/releases/generate-notes" --method POST \
+        -f tag_name="$tag" -f target_commitish="$merge" --jq .body
+} > "$notes"
+
+gh release create "$tag" --repo "$repository" --verify-tag --title "$tag" --notes-file "$notes"

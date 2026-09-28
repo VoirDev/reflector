@@ -12,6 +12,44 @@ right.
 This is the integration guide. Why the mechanism is shaped this way is in the specifications:
 [client](docs/sync-client-design.md), [server](docs/sync-server-design.md).
 
+## Getting the artifacts
+
+Releases are published to GitHub Packages. The sample below depends on the modules as projects
+(`projects.serverSdk`, `projects.clientSdk`); an application outside this repository declares
+`dev.voir.reflector:server-sdk` or `dev.voir.reflector:client-sdk` at a released version instead,
+and `dev.voir.reflector:sync-protocol` arrives with either.
+
+GitHub Packages asks for a token even to read, so the repository is declared with credentials —
+a personal access token with `read:packages`, kept out of the build files:
+
+```kotlin
+// settings.gradle.kts
+dependencyResolutionManagement {
+    repositories {
+        mavenCentral()
+        google()
+        maven {
+            name = "reflector"
+            url = uri("https://maven.pkg.github.com/VoirDev/reflector")
+            // `reflectorUsername` and `reflectorPassword` in ~/.gradle/gradle.properties, or
+            // ORG_GRADLE_PROJECT_reflectorUsername and ORG_GRADLE_PROJECT_reflectorPassword in CI.
+            credentials(PasswordCredentials::class)
+            content { includeGroup("dev.voir.reflector") }
+        }
+    }
+}
+```
+
+```kotlin
+// build.gradle.kts
+dependencies {
+    implementation("dev.voir.reflector:server-sdk:0.1.0")
+}
+```
+
+A multiplatform consumer declares `client-sdk` once, in `commonMain`; Gradle picks the JVM, Android
+or iOS variant for each target on its own.
+
 ---
 
 # Part 1 — The server

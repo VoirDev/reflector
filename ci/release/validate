@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Checks that a release is consistent with itself before anything is built from it: VERSION is a
+# semantic version and, on a release branch, the one its name promises; every publication the
+# inventory names belongs to a project that exists; and the diff is clean.
+#
+#   EXPECTED_VERSION   the version the release branch is named for, when there is one
+#
+# Run by Prepare Release on what it is about to commit, and by the release pull request's
+# `Build release artifacts` on what was pushed — which catches a hand edit that broke either.
+source "$(dirname "$0")/common.sh"
+
+version="$(read_version)"
+
+if [ -n "${EXPECTED_VERSION:-}" ] && [ "$version" != "${EXPECTED_VERSION#v}" ]; then
+    fail "VERSION holds $version, but this release is for ${EXPECTED_VERSION#v}"
+fi
+
+# Whether the build produces what each line promises is build-packages' question; this one is only
+# whether the line can name anything at all.
+while read -r artifact stem kind; do
+    case "$kind" in
+        module | variant) ;;
+        *) fail "ci/release/packages: $artifact is of kind '$kind', not module or variant" ;;
+    esac
+    project="${stem%:*}"
+    grep -q "include(\"$project\")" settings.gradle.kts \
+        || fail "ci/release/packages: $artifact is published by $project, which settings.gradle.kts does not include"
+done < <(packages)
+
+duplicates="$(packages | awk '{ print $1 }' | sort | uniq -d)"
+[ -z "$duplicates" ] || fail "ci/release/packages lists $duplicates more than once"
+
+git diff --check || fail "The changes have whitespace errors"
+git diff --cached --check || fail "The staged changes have whitespace errors"
+
+echo "Release $version is consistent"

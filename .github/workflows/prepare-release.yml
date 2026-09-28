@@ -1,0 +1,100 @@
+# Prepares a release as a pull request: the version in VERSION, committed on `release/vX.Y.Z` and
+# opened as `Release vX.Y.Z`. Nothing is built or published here — the pull request's own checks
+# build every package, and merging it publishes them (Publish Release). The Voir handbook
+# `github-release-workflow` is the contract this follows.
+#
+# Run from the default branch. Leave `version` empty to bump the current one by `release_type`, or
+# name the exact version to release — never below the current one, never one already tagged. Running
+# it again for the same version carries on the branch and pull request already there. The first
+# release names the version VERSION already holds, which no tag has yet.
+#
+# Needs the secret RELEASE_BOT_TOKEN and the variables RELEASE_BOT_NAME and RELEASE_BOT_EMAIL: a pull
+# request opened with the workflow's own token would start no workflow, so Verify would never check
+# the release. The repository has no versioned deployments, so the handbook's
+# `update_deployment_versions` input is left out.
+name: Prepare Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Exact version to release, as X.Y.Z. Empty bumps the current version by the release type
+        required: false
+        default: ""
+        type: string
+      release_type:
+        description: What to bump when no exact version is given
+        required: true
+        default: patch
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+      skip_verify:
+        description: Skip checks on the release pull request (strongly discouraged; publication then verifies itself)
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: prepare-release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Prepare release PR
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Validate source branch and release configuration
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          RELEASE_BOT_TOKEN: ${{ secrets.RELEASE_BOT_TOKEN }}
+          RELEASE_BOT_NAME: ${{ vars.RELEASE_BOT_NAME }}
+          RELEASE_BOT_EMAIL: ${{ vars.RELEASE_BOT_EMAIL }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF_NAME" != "$DEFAULT_BRANCH" ]; then
+            echo "::error::Prepare Release must run from $DEFAULT_BRANCH, not $GITHUB_REF_NAME"
+            exit 1
+          fi
+          if [ -z "$RELEASE_BOT_TOKEN" ] || [ -z "$RELEASE_BOT_NAME" ] || [ -z "$RELEASE_BOT_EMAIL" ]; then
+            echo "::error::The RELEASE_BOT_TOKEN secret and the RELEASE_BOT_NAME and RELEASE_BOT_EMAIL variables are required"
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_BOT_TOKEN }}
+
+      - name: Resolve and apply release version
+        id: version
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_TYPE: ${{ inputs.release_type }}
+        run: ci/release/prepare-version
+
+      - name: Validate release changes
+        env:
+          EXPECTED_VERSION: ${{ steps.version.outputs.version }}
+        run: ci/release/validate
+
+      - name: Create or update release pull request
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_BOT_TOKEN }}
+          RELEASE_BOT_NAME: ${{ vars.RELEASE_BOT_NAME }}
+          RELEASE_BOT_EMAIL: ${{ vars.RELEASE_BOT_EMAIL }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+          SKIP_VERIFY: ${{ inputs.skip_verify }}
+        run: ci/release/create-pull-request

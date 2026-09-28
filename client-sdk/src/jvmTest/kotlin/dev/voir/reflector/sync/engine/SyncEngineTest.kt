@@ -2,8 +2,8 @@ package dev.voir.reflector.sync.engine
 
 import dev.voir.reflector.sync.core.CollectionSyncState
 import dev.voir.reflector.sync.core.ConflictThreshold
-import dev.voir.reflector.sync.core.SyncEngine
 import dev.voir.reflector.sync.core.ScopeState
+import dev.voir.reflector.sync.core.SyncEngine
 import dev.voir.reflector.sync.core.SyncFailure
 import dev.voir.reflector.sync.core.SyncPhase
 import dev.voir.reflector.sync.core.adapter.CollectionAdapter

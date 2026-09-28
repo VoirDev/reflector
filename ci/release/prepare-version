@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# Resolves the version a release is prepared for, moves onto its release branch and writes it to
+# VERSION. The first step of Prepare Release, run on a checkout of the default branch with every tag.
+#
+#   RELEASE_VERSION   an exact MAJOR.MINOR.PATCH, or empty to bump
+#   RELEASE_TYPE      patch, minor or major; what an empty RELEASE_VERSION bumps
+#
+# An exact version may equal the current one — releasing a version that was never tagged, such as
+# the first — but never go below it, and never name a version that is already tagged. Rerunning for
+# the same version carries on the release branch that is already there, human commits included,
+# rather than starting it again.
+#
+# Writes `version`, `tag` and `branch` to the step's outputs.
+source "$(dirname "$0")/common.sh"
+
+current="$(read_version)"
+requested="${RELEASE_VERSION:-}"
+requested="${requested#v}"
+
+if [ -n "$requested" ]; then
+    is_semver "$requested" || fail "Requested version '$requested' is not MAJOR.MINOR.PATCH"
+    if version_gt "$current" "$requested"; then
+        fail "Requested version $requested is below the current $current"
+    fi
+    next="$requested"
+else
+    IFS=. read -r major minor patch <<< "$current"
+    case "${RELEASE_TYPE:-patch}" in
+        patch) next="$major.$minor.$((patch + 1))" ;;
+        minor) next="$major.$((minor + 1)).0" ;;
+        major) next="$((major + 1)).0.0" ;;
+        *) fail "Release type '${RELEASE_TYPE}' is not patch, minor or major" ;;
+    esac
+fi
+
+tag="v$next"
+branch="release/$tag"
+
+if git rev-parse -q --verify "refs/tags/$tag" > /dev/null \
+    || [ -n "$(git ls-remote --tags origin "refs/tags/$tag")" ]; then
+    fail "$tag is already tagged; a released version is never prepared again"
+fi
+
+echo "Current version $current, preparing $next"
+
+# An existing release branch is carried on, never reset: what somebody pushed to it to make its
+# checks pass is part of the release.
+if git ls-remote --exit-code --heads origin "$branch" > /dev/null; then
+    echo "$branch exists; carrying it on"
+    git fetch --no-tags origin "$branch"
+    git switch -C "$branch" FETCH_HEAD
+else
+    git switch -c "$branch"
+fi
+
+echo "$next" > VERSION
+
+output version "$next"
+output tag "$tag"
+output branch "$branch"

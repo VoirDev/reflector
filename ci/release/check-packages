@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# Checks the repository under build/release against its manifest and against the release it is
+# about to be published for: the right version, every artifact in the inventory and no other, each
+# POM the one that was built and naming the manifest's revision, and — when EXPECTED_TREE is set —
+# built from exactly that tree.
+#
+#   EXPECTED_VERSION   the version being released
+#   EXPECTED_TREE      the tree the packages must have been built from, when the caller knows it
+#
+# Exits non-zero, saying why, on the first thing that does not match.
+source "$(dirname "$0")/common.sh"
+
+manifest="$BUILD_DIR/manifest"
+[ -f "$manifest" ] || fail "No manifest in $BUILD_DIR"
+
+field() {
+    awk -v key="$1" '$1 == key { print $2 }' "$manifest"
+}
+
+version="$(field version)"
+revision="$(field revision)"
+[ "$version" = "${EXPECTED_VERSION:?EXPECTED_VERSION is required}" ] \
+    || fail "The packages are for version '$version', not $EXPECTED_VERSION"
+
+if [ -n "${EXPECTED_TREE:-}" ]; then
+    tree="$(field tree)"
+    [ "$tree" = "$EXPECTED_TREE" ] \
+        || fail "The packages were built from tree $tree, not $EXPECTED_TREE"
+fi
+
+expected="$(packages | awk '{ print $1 }' | sort)"
+listed="$(awk '$1 == "package" { print $2 }' "$manifest" | sort)"
+[ "$expected" = "$listed" ] \
+    || fail "The manifest lists [$(tr '\n' ' ' <<< "$listed")], the inventory [$(tr '\n' ' ' <<< "$expected")]"
+
+# What Gradle actually wrote, which is where an artifact nobody added to the inventory shows up.
+built="$(find "$REPOSITORY_DIR/${GROUP//.//}" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; | sort)"
+[ "$expected" = "$built" ] \
+    || fail "The build publishes [$(tr '\n' ' ' <<< "$built")], but ci/release/packages lists [$(tr '\n' ' ' <<< "$expected")]"
+
+while read -r _ artifact checksum; do
+    dir="$(artifact_dir "$artifact" "$version")"
+    pom="$dir/$artifact-$version.pom"
+    [ -f "$pom" ] || fail "$pom is missing"
+    [ -f "$dir/$artifact-$version.module" ] || fail "$artifact has no Gradle module metadata"
+    [ "$(sha256_of "$pom")" = "$checksum" ] || fail "$pom is not the POM that was built"
+    [ "$(pom_revision < "$pom")" = "$revision" ] || fail "$pom does not name revision $revision"
+done < <(awk '$1 == "package"' "$manifest")
+
+echo "The packages match release $version"

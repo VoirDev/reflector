@@ -5,8 +5,8 @@
 # official Kotlin Gradle Plugin compatibility matrix.
 
 [versions]
-kotlin = "2.4.10"
-ksp = "2.3.11"
+kotlin = "2.4.20"
+ksp = "2.3.12"
 agp = "9.4.0"
 
 jvmToolchain = "21"

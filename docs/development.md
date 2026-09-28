@@ -32,8 +32,6 @@ and the bundled Ktor client goes unused.
 
 ```bash
 ./gradlew build              # compile and test
-./gradlew spotlessApply      # format
-./gradlew spotlessCheck      # verify formatting
 ./gradlew publishToMavenLocal # publish the artifacts to ~/.m2 for a local consumer
 ci/verify                    # what a pull request must pass: the whole build
 ci/verify apple              # the Apple targets alone, on macOS
@@ -72,7 +70,7 @@ push branches and open pull requests — one made with the workflow's own token 
 checks) and the variables `RELEASE_BOT_NAME` and `RELEASE_BOT_EMAIL`; an environment named `release`,
 with required reviewers if publication should wait for a person; and a ruleset on `main` requiring
 `Verify / Build and check whole repository` and `Verify / Build release artifacts`. The first release
-is prepared with `version` set to the `0.1.0` that `VERSION` already holds.
+is prepared with `version` set to the version `VERSION` already holds.
 
 A `[skip verify]` in a pull request's body skips its checks. On a release, publication then verifies
 the merged commit itself before anything goes out.
@@ -94,14 +92,17 @@ block the queue.
 
 ## Versions
 
-`VERSION` holds the repository version (currently `0.1.0`) and every module takes it. Coordinates
+`VERSION` holds the repository version (currently `0.1.1`) and every module takes it. Coordinates
 are derived from the path — `dev.voir.reflector.client`, `dev.voir.reflector.server`,
 `dev.voir.reflector` for the contracts — because identically named modules on both sides otherwise
 collapse into one artifact during resolution.
 
-Kotlin 2.4.10 / Gradle 9.7.1 / AGP 9.4.0 is a point inside the Kotlin Gradle Plugin's official
-compatibility matrix, even though newer Gradle and AGP releases exist.
+The build runs Kotlin 2.4.20 with Gradle 9.7.1 and AGP 9.4.1. Both are slightly past what the
+Kotlin Gradle plugin's official compatibility table lists for 2.4.20 (Gradle up to 9.7.0, AGP up to
+9.3.1, as of September 2026). The Kotlin documentation allows newer Gradle and AGP releases but
+warns of deprecation warnings and features that may not work, so a Gradle or AGP warning is worth
+checking against that table before anything else.
 
-Static analysis is limited to formatting: detekt's stable 1.23.x is built against Kotlin 2.0.21, and
-the 2.0 branch (group `dev.detekt`, built against 2.4.10) is still in alpha. The version is in the
-catalogue, ready to be switched on — [TODO.md](../TODO.md) §5.
+The build runs no formatter or static analysis. Spotless with ktlint was removed because it was
+not working, and detekt's stable 1.23.x is built against Kotlin 2.0.21 while the 2.0 branch (group
+`dev.detekt`) is still in alpha — [TODO.md](../TODO.md) §5.

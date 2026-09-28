@@ -21,7 +21,7 @@ Why the mechanism is shaped this way is in [How it works](concepts.md) and in th
 
 ```kotlin
 dependencies {
-    implementation("dev.voir.reflector:server-sdk:0.1.0")
+    implementation("dev.voir.reflector:server-sdk:<version>")
 
     // Your database. The module brings Exposed's JDBC layer with it: you create the `Database`
     // and hand it over, and the module never takes Exposed's global default.
@@ -29,14 +29,16 @@ dependencies {
     implementation("com.zaxxer:HikariCP:7.1.0")
 
     // Your transport. The sample uses Ktor; nothing in the module depends on it.
-    implementation("io.ktor:ktor-server-netty:3.5.2")
-    implementation("io.ktor:ktor-server-content-negotiation:3.5.2")
-    implementation("io.ktor:ktor-server-websockets:3.5.2")
-    implementation("io.ktor:ktor-serialization-kotlinx-json:3.5.2")
+    implementation("io.ktor:ktor-server-netty:3.6.0")
+    implementation("io.ktor:ktor-server-content-negotiation:3.6.0")
+    implementation("io.ktor:ktor-server-websockets:3.6.0")
+    implementation("io.ktor:ktor-serialization-kotlinx-json:3.6.0")
 }
 ```
 
-How to reach the GitHub Packages repository is in the [README](../README.md#installation).
+`<version>` is the latest release on the
+[releases page](https://github.com/VoirDev/reflector/releases); how to reach the GitHub Packages
+repository is in the [README](../README.md#installation).
 
 ## Start-up order
 

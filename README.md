@@ -16,8 +16,10 @@ of them and without guessing at conflicts on the user's behalf.
   database schema.
 - **Multiplatform.** The client runs on Android, iOS (arm64 and simulator) and the JVM.
 
-> **Status:** `0.1.0`, the first release. The mechanism is implemented and covered by tests; the API
-> may still move. What is known to be missing is listed in [TODO.md](TODO.md).
+> **Status:** early releases — the latest is on the
+> [releases page](https://github.com/VoirDev/reflector/releases). The mechanism is implemented and
+> covered by tests; the API may still move. What is known to be missing is listed in
+> [TODO.md](TODO.md).
 
 ---
 
@@ -74,7 +76,7 @@ The vocabulary you will meet everywhere:
 
 | | |
 |---|---|
-| Kotlin | 2.4.10 |
+| Kotlin | 2.4.20 |
 | JDK | 21 for the server and the JVM client; Android bytecode targets 17 |
 | Client targets | Android (minSdk 26), iOS `iosArm64` / `iosSimulatorArm64`, JVM |
 | Client stack | Room 3 (`androidx.room3`) with KSP, Ktor client, kotlinx.serialization |
@@ -107,11 +109,15 @@ dependencyResolutionManagement {
 }
 ```
 
+In the snippets below, `<version>` is the latest release on the
+[releases page](https://github.com/VoirDev/reflector/releases). The client and server artifacts are
+released together, so both take the same number.
+
 **Server** — a JVM backend:
 
 ```kotlin
 dependencies {
-    implementation("dev.voir.reflector:server-sdk:0.1.0")
+    implementation("dev.voir.reflector:server-sdk:<version>")
     implementation("org.postgresql:postgresql:42.7.13")
 }
 ```
@@ -130,12 +136,12 @@ plugins {
 kotlin {
     sourceSets {
         commonMain.dependencies {
-            implementation("dev.voir.reflector:client-sdk:0.1.0")
-            implementation("androidx.sqlite:sqlite-bundled:2.7.0")   // or any SQLite driver
+            implementation("dev.voir.reflector:client-sdk:<version>")
+            implementation("androidx.sqlite:sqlite-bundled:2.7.1")   // or any SQLite driver
         }
-        androidMain.dependencies { implementation("io.ktor:ktor-client-okhttp:3.5.2") }
-        iosMain.dependencies { implementation("io.ktor:ktor-client-darwin:3.5.2") }
-        jvmMain.dependencies { implementation("io.ktor:ktor-client-cio:3.5.2") }
+        androidMain.dependencies { implementation("io.ktor:ktor-client-okhttp:3.6.0") }
+        iosMain.dependencies { implementation("io.ktor:ktor-client-darwin:3.6.0") }
+        jvmMain.dependencies { implementation("io.ktor:ktor-client-cio:3.6.0") }
     }
 }
 
@@ -145,10 +151,10 @@ room3 {
 
 dependencies {
     // Room runs KSP per target; without these lines the DAOs are not generated.
-    add("kspAndroid", "androidx.room3:room3-compiler:3.0.2")
-    add("kspJvm", "androidx.room3:room3-compiler:3.0.2")
-    add("kspIosArm64", "androidx.room3:room3-compiler:3.0.2")
-    add("kspIosSimulatorArm64", "androidx.room3:room3-compiler:3.0.2")
+    add("kspAndroid", "androidx.room3:room3-compiler:3.0.3")
+    add("kspJvm", "androidx.room3:room3-compiler:3.0.3")
+    add("kspIosArm64", "androidx.room3:room3-compiler:3.0.3")
+    add("kspIosSimulatorArm64", "androidx.room3:room3-compiler:3.0.3")
 }
 ```
 

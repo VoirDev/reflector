@@ -74,8 +74,9 @@ Before any change to Kotlin code, invoke in this order:
    example — `kotlin-style` and this repository's own rules are the whole of the standard. That is
    a real answer, not a gap to be filled by guessing at a convention.
 
-The versions line up rather than being assumed to: this repository builds on Kotlin 2.4.10 and
-Exposed 1.5.0, which is what `kotlin-style` and `exposed-v1-5` are written against. When a
+The versions line up rather than being assumed to: this repository builds on Kotlin 2.4.20 and
+Exposed 1.5.0, inside what `kotlin-style` (Kotlin 2.4+) and `exposed-v1-5` (Exposed 1.5) are
+written against. When a
 dependency in [`gradle/libs.versions.toml`](gradle/libs.versions.toml) moves past what a skill
 states it was validated for, that is a conflict to raise rather than to assume away.
 
@@ -156,8 +157,6 @@ the rules for transactions and the requirements for migrations.
 
 ```bash
 ./gradlew build            # build and test every module
-./gradlew spotlessApply    # format (ktlint via Spotless)
-./gradlew spotlessCheck    # verify formatting
 ```
 
 Build configuration:
@@ -165,7 +164,7 @@ Build configuration:
 - versions only through `gradle/libs.versions.toml`, no string coordinates in modules;
 - plugins are applied in modules through catalogue aliases (`alias(libs.plugins.kotlinJvm)`)
   and declared once in the root `build.gradle.kts` with `apply false`;
-- settings shared by modules (toolchain, compiler options, Spotless, JUnit Platform) live in
+- settings shared by modules (toolchain, compiler options, JUnit Platform) live in
   the `allprojects` block of the root `build.gradle.kts`, via `plugins.withId`; the repository
   has no separate included build with convention plugins;
 - dependencies between modules go through typesafe accessors (`projects.clientSdk`);

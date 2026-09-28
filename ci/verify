@@ -2,7 +2,7 @@
 # Decides whether this repository is safe to merge. The same command runs on a laptop and in the
 # `Verify` workflow, so a pull request fails in CI for exactly the reasons it would fail here.
 #
-#   ci/verify          the whole Gradle build: formatting, compilation, every test the host can run
+#   ci/verify          the whole Gradle build: compilation and every test the host can run
 #   ci/verify apple    the Apple targets alone: compile iosArm64, run the iosSimulatorArm64 tests
 #
 # `./gradlew build` builds the Apple targets only on macOS; everywhere else Kotlin skips them. The

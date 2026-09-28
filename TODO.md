@@ -75,10 +75,12 @@ Files need nothing platform-specific for it — `LedgerFiles` is written against
 camera roll is exactly the case where a device's own storage rules bite, and nothing has tried that
 either.
 
-## 5. detekt is not enabled
+## 5. No formatter or static analysis is enabled
 
-The stable 1.23.x branch is compiled against Kotlin 2.0.21; the 2.0 branch (group `dev.detekt`) is
-built against 2.4.10 but still in alpha. The version is already in the catalogue.
+Spotless with ktlint was removed because it was not working, so nothing checks formatting any more;
+`.editorconfig` is what an editor still follows. detekt was never switched on: the stable 1.23.x
+branch is compiled against Kotlin 2.0.21, and the 2.0 branch (group `dev.detekt`) is built against
+2.4.10 but still in alpha.
 
 **Leaning.** Switch it on when 2.0 goes stable, in one change, with the initial baseline empty
 rather than generated.

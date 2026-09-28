@@ -31,17 +31,17 @@ kotlin {
         commonMain.dependencies {
             // The whole client library is one artifact: the engine, the Ktor transport and the
             // Room tables your @Database declares all arrive with it.
-            implementation("dev.voir.reflector:client-sdk:0.1.0")
+            implementation("dev.voir.reflector:client-sdk:<version>")
 
             // Room itself arrives with the SDK — your @Database is written against it, so it is
             // part of the contract rather than a detail. A SQLite driver does not: bundled,
             // Android and native are all valid choices and the SDK does not make yours.
-            implementation("androidx.sqlite:sqlite-bundled:2.7.0")
+            implementation("androidx.sqlite:sqlite-bundled:2.7.1")
         }
         // A Ktor engine per platform, for `syncHttpClient(engine)`.
-        androidMain.dependencies { implementation("io.ktor:ktor-client-okhttp:3.5.2") }
-        iosMain.dependencies { implementation("io.ktor:ktor-client-darwin:3.5.2") }
-        jvmMain.dependencies { implementation("io.ktor:ktor-client-cio:3.5.2") }
+        androidMain.dependencies { implementation("io.ktor:ktor-client-okhttp:3.6.0") }
+        iosMain.dependencies { implementation("io.ktor:ktor-client-darwin:3.6.0") }
+        jvmMain.dependencies { implementation("io.ktor:ktor-client-cio:3.6.0") }
     }
 }
 
@@ -52,14 +52,16 @@ room3 {
 dependencies {
     // Room runs KSP per target: there is no shared `ksp` configuration in KMP, and without
     // listing the targets the DAOs are simply not generated.
-    add("kspAndroid", "androidx.room3:room3-compiler:3.0.2")
-    add("kspJvm", "androidx.room3:room3-compiler:3.0.2")
-    add("kspIosArm64", "androidx.room3:room3-compiler:3.0.2")
-    add("kspIosSimulatorArm64", "androidx.room3:room3-compiler:3.0.2")
+    add("kspAndroid", "androidx.room3:room3-compiler:3.0.3")
+    add("kspJvm", "androidx.room3:room3-compiler:3.0.3")
+    add("kspIosArm64", "androidx.room3:room3-compiler:3.0.3")
+    add("kspIosSimulatorArm64", "androidx.room3:room3-compiler:3.0.3")
 }
 ```
 
-How to reach the GitHub Packages repository is in the [README](../README.md#installation).
+`<version>` is the latest release on the
+[releases page](https://github.com/VoirDev/reflector/releases); how to reach the GitHub Packages
+repository is in the [README](../README.md#installation).
 
 ## Your rows
 
@@ -142,8 +144,8 @@ files: `SyncDatabase` asks for the blob DAOs either way, and an application that
 
 That also means **the library's schema changes are your migrations**: your `@Database` owns the
 version number, so a release of the library that adds a column to one of its tables needs a version
-bump and a migration from you, exactly as one of your own tables would. The library is at 0.1.0 and
-has not yet made such a release, so there is no upgrade path to reproduce here — what follows is the
+bump and a migration from you, exactly as one of your own tables would. No release of the library
+has made such a change yet, so there is no upgrade path to reproduce here — what follows is the
 shape one takes when it comes.
 
 An additive change is Room's to derive: raise the version and declare the step.

@@ -60,20 +60,29 @@ runs the same on a laptop:
   that dependencies which only work together — Kotlin, KSP and AGP among them — move together.
 - **Prepare Release**, run by hand from `main`, bumps `VERSION` (or takes an exact version) and opens
   `Release vX.Y.Z` from `release/vX.Y.Z`.
-- **Publish Release** runs when that pull request is merged: it verifies the merged commit unless the
-  pull request's checks already covered its exact tree, waits for the `release` environment, builds
-  and publishes every package in [`ci/release/packages`](../ci/release/packages) from the merged commit,
-  then tags `vX.Y.Z` and writes the GitHub Release. Every step is safe to rerun.
+- **Publish Release** runs when that pull request is merged, in two jobs one after the other: it
+  waits for the `release` environment, builds every package in
+  [`ci/release/packages`](../ci/release/packages) from the merged commit and publishes it, then tags
+  `vX.Y.Z` and writes the GitHub Release. It does not run the tests again — the release pull request's
+  checks are the verification. The tag comes last because it marks a release complete, so rerunning
+  a failed publication carries on where it stopped and never overwrites a published package.
+
+  Not verifying the merged commit again departs from the handbook's `github-release-workflow`, on
+  purpose: a release is one line from pull request to packages, with no job deciding whether another
+  must run. What makes it safe is the ruleset on `main` requiring branches to be up to date before
+  merging, so the merged commit is the one the pull request's checks tested.
 
 What the repository needs before the first release: the secret `RELEASE_BOT_TOKEN` (a token that may
 push branches and open pull requests — one made with the workflow's own token would start no
 checks) and the variables `RELEASE_BOT_NAME` and `RELEASE_BOT_EMAIL`; an environment named `release`,
 with required reviewers if publication should wait for a person; and a ruleset on `main` requiring
-`Verify / Build and check whole repository` and `Verify / Build release artifacts`. The first release
+`Verify / Build and check whole repository` and `Verify / Build release artifacts`, with branches up
+to date before merging. The first release
 is prepared with `version` set to the version `VERSION` already holds.
 
-A `[skip verify]` in a pull request's body skips its checks. On a release, publication then verifies
-the merged commit itself before anything goes out.
+A `[skip verify]` in a pull request's body skips its checks. On a release pull request that skips
+`Build release artifacts` too, and nothing tests the release before it is published — so it is for a
+release whose content was verified elsewhere, not a shortcut.
 
 ## Building from a network-isolated environment
 

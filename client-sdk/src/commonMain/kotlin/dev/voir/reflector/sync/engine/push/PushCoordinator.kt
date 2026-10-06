@@ -27,6 +27,8 @@ import dev.voir.reflector.sync.persistence.record.RecordState
 import dev.voir.reflector.sync.protocol.BlobId
 import dev.voir.reflector.sync.protocol.ClientId
 import dev.voir.reflector.sync.protocol.CollectionId
+import dev.voir.reflector.sync.protocol.EntityId
+import dev.voir.reflector.sync.protocol.EntityType
 import dev.voir.reflector.sync.protocol.GroupId
 import dev.voir.reflector.sync.protocol.ScopeId
 import dev.voir.reflector.sync.protocol.config.SyncLimits
@@ -419,7 +421,7 @@ internal class PushCoordinator(
         stores.records.capturePushingRevisions(group.groupId)
 
         oversized(ops, sent)?.let { reason ->
-            failGroup(group.groupId, reason.message)
+            failGroup(group.groupId, reason.message, RejectCode.TOO_LARGE)
             adapter.onRejected(entityType = null, id = null, rejection = reason)
             return Preparation.Rejected(group.groupId, ops.size, reason.message)
         }
@@ -643,7 +645,13 @@ internal class PushCoordinator(
                 } else if (result.error.code == RejectCode.BLOB_MISSING) {
                     reuploadAndRetry(prepared.group, result.error.message)
                 } else {
-                    failGroup(prepared.group.groupId, result.error.message)
+                    failGroup(
+                        groupId = prepared.group.groupId,
+                        message = result.error.message,
+                        code = result.error.code,
+                        entityType = result.error.entity,
+                        entityId = result.error.id,
+                    )
                     adapter.onRejected(result.error.entity, result.error.id, result.error.toRejection())
                     stores.collections.recordFailure(scope, collection, result.error.message)
                     reportFailure(
@@ -746,7 +754,7 @@ internal class PushCoordinator(
                 "the server still calls the group dependent after $maxDependencyMerges merges; it is failed " +
                     "and the queue is blocked on it: $message"
             }
-            failGroup(group.groupId, message)
+            failGroup(group.groupId, message, RejectCode.DEPENDENCY)
             adapter.onRejected(
                 entityType = null,
                 id = null,
@@ -874,15 +882,28 @@ internal class PushCoordinator(
         return outcome
     }
 
+    /**
+     * Fails a group for good, keeping the refusal beside it so it can be read back after a restart.
+     *
+     * @param groupId Group that was refused.
+     * @param message Description of the refusal.
+     * @param code Wire code of the refusal, or the one the library chose for a refusal of its own.
+     * @param entityType Entity type the refusal named, or `null` when it named the group.
+     * @param entityId Entity the refusal named, or `null` when it named the group.
+     */
     private suspend fun failGroup(
         groupId: GroupId,
         message: String,
+        code: RejectCode,
+        entityType: EntityType? = null,
+        entityId: EntityId? = null,
     ) {
-        stores.groups.recordAttempt(
+        stores.groups.recordRefusal(
             groupId = groupId,
-            state = PushGroupState.FAILED,
-            nextRetryAt = null,
             error = message,
+            code = code,
+            entityType = entityType,
+            entityId = entityId,
         )
     }
 

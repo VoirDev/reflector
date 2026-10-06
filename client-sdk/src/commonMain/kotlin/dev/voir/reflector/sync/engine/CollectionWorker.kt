@@ -102,6 +102,15 @@ internal class CollectionWorker(
     val lastFailure: MutableStateFlow<SyncFailure?> = MutableStateFlow(null)
 
     private val requests = Channel<Unit>(Channel.CONFLATED)
+
+    /**
+     * Whether the application asked for this device's unsent changes to be discarded.
+     *
+     * A flag rather than a request of its own, so that it is carried out by the cycle in its proper
+     * place — after the limits are known and before anything is pushed — rather than racing a cycle
+     * already running. A state flow only for its atomic compare-and-set.
+     */
+    private val discardRequested = MutableStateFlow(false)
     private val declined = mutableSetOf<ConflictId>()
     private val references = blobStore?.let { BlobReferences(scope, collection, stores, adapter, blobFetch) }
     private val reconciler =
@@ -172,6 +181,15 @@ internal class CollectionWorker(
         requests.trySend(Unit)
     }
 
+    /**
+     * Asks the worker to throw away every unsent change and rebuild the collection, at the start of
+     * its next cycle.
+     */
+    fun requestDiscard() {
+        discardRequested.value = true
+        requestSync()
+    }
+
     private suspend fun cycle() {
         val startedAt = clock.now()
         log.debug(SyncLogEvent.CYCLE_STARTED) { "a synchronisation cycle began" }
@@ -230,6 +248,11 @@ internal class CollectionWorker(
 
         startBlobWorker(limits)
         reconcileSchema()
+        // Before the queue is drained, which is the whole point: the head the server keeps refusing
+        // is exactly what must not be tried again.
+        if (discardRequested.compareAndSet(expect = true, update = false)) {
+            return discardAndRebuild(bootstrap)
+        }
         if (needsBootstrap() && !bootstrap(bootstrap)) {
             return
         }
@@ -631,6 +654,42 @@ internal class CollectionWorker(
         }
         log.info(SyncLogEvent.RESYNC_REQUIRED, context = { mapOf("reason" to "collection-reset") }) {
             "the collection will be rebuilt from a snapshot because the server replaced it"
+        }
+        bootstrap(coordinator)
+    }
+
+    /**
+     * Throws away this device's unsent work because the application asked, and rebuilds.
+     *
+     * The same discarding [resetToServer] does, without the parts that belong to a collection the
+     * server replaced: the incarnation is still the one this device follows, so it is kept, and the
+     * files the snapshot still names are kept rather than downloaded again. What the dropped
+     * documents alone pointed at is released by the reconciliation that follows every cycle.
+     *
+     * @param coordinator Bootstrap to rebuild the collection with once its local changes are gone.
+     */
+    private suspend fun discardAndRebuild(coordinator: BootstrapCoordinator) {
+        val abandoned =
+            transactions.transaction {
+                val pending = stores.records.pendingCount(scope, collection)
+                stores.groups.deleteCollection(scope, collection)
+                stores.conflicts.deleteCollection(scope, collection)
+                stores.inbox.clear(scope, collection)
+                stores.records.discardLocalChanges(scope, collection)
+                // Written in the same transaction: a process that dies after this has a collection
+                // that still knows it must be rebuilt, rather than one that has forgotten its
+                // changes and kept rows nothing will ever overwrite.
+                stores.collections.setPhase(scope, collection, SyncPhase.RESYNC_REQUIRED)
+                pending
+            }
+        declined.clear()
+        lastFailure.value = null
+        log.warn(
+            SyncLogEvent.LOCAL_CHANGES_DISCARDED,
+            context = { mapOf("abandoned" to abandoned.toString()) },
+        ) { "the application asked for $abandoned unsent change(s) to be discarded" }
+        log.info(SyncLogEvent.RESYNC_REQUIRED, context = { mapOf("reason" to "discarded") }) {
+            "the collection will be rebuilt from a snapshot because its local changes were discarded"
         }
         bootstrap(coordinator)
     }

@@ -2,12 +2,14 @@ package dev.voir.reflector.sync.engine
 
 import dev.voir.reflector.sync.core.CollectionSyncState
 import dev.voir.reflector.sync.core.ConflictThreshold
+import dev.voir.reflector.sync.core.RefusedGroup
 import dev.voir.reflector.sync.core.ScopeState
 import dev.voir.reflector.sync.core.SyncEngine
 import dev.voir.reflector.sync.core.SyncFailure
 import dev.voir.reflector.sync.core.SyncPhase
 import dev.voir.reflector.sync.core.adapter.CollectionAdapter
 import dev.voir.reflector.sync.core.adapter.SchemaFingerprint
+import dev.voir.reflector.sync.core.adapter.SyncRejection
 import dev.voir.reflector.sync.core.conflict.Resolution
 import dev.voir.reflector.sync.core.log.RecordingSyncLog
 import dev.voir.reflector.sync.core.log.SyncLogEvent
@@ -350,6 +352,74 @@ class SyncEngineTest {
             val restored = afterRestart.diagnostics()
             assertEquals("currency is required", restored.queue.first().lastError)
             assertEquals(head.groupId, restored.queue.first().groupId)
+
+            // And what the adapter was told once is still readable: which entity, and why.
+            assertEquals(
+                listOf(
+                    RefusedGroup(
+                        groupId = head.groupId,
+                        entityType = wallet,
+                        entityId = walletId,
+                        rejection = SyncRejection.Validation("currency is required"),
+                    ),
+                ),
+                afterRestart.refusals.first(),
+                "a refusal outlives the process that was told about it",
+            )
+        }
+
+    @Test
+    fun `discarding local changes clears a refused queue and rebuilds from the server`() =
+        runBlocking<Unit> {
+            transport.onSnapshot = { emptySnapshot() }
+            transport.onPush = { request ->
+                PushResponse(
+                    results =
+                        listOf(
+                            PushGroupResult.Rejected(
+                                groupId = request.groups.single().groupId,
+                                error =
+                                    RejectError(
+                                        code = RejectCode.VALIDATION,
+                                        entity = wallet,
+                                        id = walletId,
+                                        message = "currency is required",
+                                    ),
+                            ),
+                        ),
+                    latestSeq = BatchSeq("1"),
+                    epoch = TEST_EPOCH,
+                )
+            }
+            val collection = engine(workers).scope(scopeId).collection(ledger)
+            collection.mutate {
+                adapter.bodies[wallet to walletId] = buildJsonObject { put("title", "Cash") }
+                markUpserted(wallet, walletId)
+            }
+            awaitRecord("the refusal") { it.event == SyncLogEvent.PUSH_REJECTED }
+            assertTrue(collection.diagnostics().isQueueBlocked, "the refused head blocks the queue")
+            assertEquals(1, collection.refusals.first().size, "the refusal is published")
+            val pushesBefore = transport.pushes.size
+            val snapshotsBefore = snapshots
+
+            collection.discardLocalChanges()
+
+            awaitRecord("the changes being discarded") { record ->
+                record.event == SyncLogEvent.LOCAL_CHANGES_DISCARDED && record.level == SyncLogLevel.WARN
+            }
+            collection.state.await("a live collection with nothing waiting") {
+                it.phase == SyncPhase.LIVE && it.pendingCount == 0
+            }
+
+            val diagnostics = collection.diagnostics()
+            assertTrue(diagnostics.queue.isEmpty(), "the refused group is gone, not retried")
+            assertTrue(collection.refusals.first().isEmpty(), "nothing is reported refused any more")
+            assertTrue(snapshots > snapshotsBefore, "the collection was rebuilt from a snapshot")
+            assertEquals(pushesBefore, transport.pushes.size, "the refused change is not sent again")
+            assertNull(
+                adapter.bodies[wallet to walletId],
+                "a row the server never accepted goes with the change that created it",
+            )
         }
 
     @Test

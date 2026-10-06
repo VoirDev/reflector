@@ -60,6 +60,14 @@ public enum class SyncLogEvent(
     COLLECTION_RESET(SyncLogSource.ENGINE),
 
     /**
+     * The application asked for the changes this device had not sent to be thrown away.
+     *
+     * Reported at `WARN` with how many were given up, for the same reason as [COLLECTION_RESET]:
+     * it is work the user can no longer get back, and somebody will ask where it went.
+     */
+    LOCAL_CHANGES_DISCARDED(SyncLogSource.ENGINE),
+
+    /**
      * The queue stopped draining and nothing the library does will restart it.
      *
      * Reported when the collection enters that state, not once per cycle: a line per timer tick

@@ -5,6 +5,7 @@ import androidx.room3.Dao
 import androidx.room3.Insert
 import androidx.room3.Query
 import dev.voir.reflector.sync.persistence.SyncColumnConverters
+import kotlinx.coroutines.flow.Flow
 import kotlin.uuid.Uuid
 
 /** Access to the push queue of collections. */
@@ -144,6 +145,55 @@ public interface SyncGroupDao {
         nextRetryAt: Long?,
         error: String?,
     )
+
+    /**
+     * Fails a group for good, recording what the refusal was and what it named.
+     *
+     * One statement with the attempt it ends, so a group is never failed without its reason or the
+     * other way round.
+     *
+     * @param groupId Group that was refused.
+     * @param state State to move to, always [PushGroupState.FAILED].
+     * @param error Description of the refusal.
+     * @param code Wire code of the refusal.
+     * @param entityType Entity type the refusal named, or `null` when it named the group.
+     * @param entityId Entity the refusal named, or `null` when it named the group.
+     */
+    @Query(
+        "UPDATE sync_group SET state = :state, attempts = attempts + 1, next_retry_at = NULL, " +
+            "last_error = :error, reject_code = :code, reject_entity_type = :entityType, " +
+            "reject_entity_id = :entityId WHERE group_id = :groupId",
+    )
+    public suspend fun recordRefusal(
+        groupId: Uuid,
+        state: PushGroupState,
+        error: String,
+        code: String,
+        entityType: String?,
+        entityId: Uuid?,
+    )
+
+    /**
+     * Follows the groups of a collection that were refused for good.
+     *
+     * In practice at most one, the head: nothing behind a failed group is sent, so nothing behind it
+     * can be refused. Returned as a list all the same, because that is a fact about the engine and
+     * not about the table.
+     *
+     * @param scopeId Scope of the collection.
+     * @param collectionId Identifier of the collection.
+     * @param state State to look for, always [PushGroupState.FAILED].
+     * @return The refused groups in queue order, re-emitted whenever the table changes.
+     */
+    @Query(
+        "SELECT * FROM sync_group WHERE scope_id = :scopeId AND collection_id = :collectionId " +
+            "AND state = :state ORDER BY ord",
+    )
+    public fun observeInState(
+        scopeId: String,
+        collectionId: String,
+        state: PushGroupState,
+    ): Flow<List<SyncGroupEntity>>
 
     /**
      * Takes the ordinal and the merge counter of an absorbed group into the surviving one.

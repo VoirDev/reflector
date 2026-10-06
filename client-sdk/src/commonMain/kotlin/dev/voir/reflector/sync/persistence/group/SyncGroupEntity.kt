@@ -28,6 +28,14 @@ import kotlin.uuid.Uuid
  *   depending on another group. Bounded: without a ceiling, a server that keeps answering the same
  *   way would make the client merge forever.
  * @property lastError Description of the most recent failure, or `null` when there was none.
+ * @property rejectCode Wire code of the refusal that failed the group for good, or `null` while it
+ *   has not been refused. Kept beside the group rather than only handed to the adapter, because the
+ *   group stays at the head of the queue across restarts and the adapter is told only once: without
+ *   this, a device restarted with a blocked queue could say that it is blocked but not why.
+ * @property rejectEntityType Entity type the refusal named, or `null` when it was about the group
+ *   as a whole.
+ * @property rejectEntityId Entity the refusal named, or `null` when it was about the group as a
+ *   whole.
  */
 @Entity(
     tableName = "sync_group",
@@ -44,4 +52,7 @@ public data class SyncGroupEntity(
     @ColumnInfo(name = "next_retry_at") public val nextRetryAt: Long?,
     @ColumnInfo(name = "dependency_merges") public val dependencyMerges: Int,
     @ColumnInfo(name = "last_error") public val lastError: String?,
+    @ColumnInfo(name = "reject_code") public val rejectCode: String? = null,
+    @ColumnInfo(name = "reject_entity_type") public val rejectEntityType: String? = null,
+    @ColumnInfo(name = "reject_entity_id") public val rejectEntityId: Uuid? = null,
 )

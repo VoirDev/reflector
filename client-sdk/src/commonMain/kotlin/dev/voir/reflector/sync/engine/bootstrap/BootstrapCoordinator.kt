@@ -301,7 +301,7 @@ internal class BootstrapCoordinator(
                 transactions.transaction {
                     stores.collections.recordFailure(scope, collection, failure.message.orEmpty())
                 }
-                BootstrapOutcome.Blocked
+                BootstrapOutcome.Blocked(failure)
             }
         }
 

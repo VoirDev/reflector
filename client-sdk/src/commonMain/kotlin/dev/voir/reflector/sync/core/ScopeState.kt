@@ -17,7 +17,9 @@ public sealed class ScopeState {
      * The device has no network at all.
      *
      * Local mutations keep working and keep queueing: this is the normal state of an offline-first
-     * client, not an error to show as one, and it ends on its own when the connection returns.
+     * client, not an error to show as one, and it ends on its own when the connection returns: the
+     * first request the server answers, or the event channel reconnecting, moves the scope back to
+     * [Online].
      *
      * Reported only when the application supplies a
      * [dev.voir.reflector.sync.core.transport.NetworkAvailability] and it says the device has no
@@ -33,7 +35,7 @@ public sealed class ScopeState {
      * them: one is this device's own situation and ends when they walk back into coverage, and the
      * other is not their doing and will not. Both queue local changes and both retry, so nothing in
      * the library behaves differently — the distinction exists so that an application can say the
-     * true one.
+     * true one. It ends the same way [Offline] does.
      */
     public data object ServerUnreachable : ScopeState()
 
@@ -41,7 +43,8 @@ public sealed class ScopeState {
      * The server rejected the client's credentials and refreshing them did not help.
      *
      * Workers stop instead of backing off, because a retry cannot produce a token. Local data and
-     * the push queue are preserved, so signing in again lets the queued changes leave.
+     * the push queue are preserved, so signing in again lets the queued changes leave — and the
+     * first push, log read or snapshot the server then accepts returns the scope to [Online].
      */
     public data object AuthRequired : ScopeState()
 

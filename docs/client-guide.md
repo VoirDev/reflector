@@ -236,6 +236,16 @@ val channel = KtorSyncEventChannel(http, baseUrl, tokens)
 `409`, `410` and `429` are part of the protocol rather than failures to throw — `409` in particular
 is how a client is told the collection it follows was purged.
 
+It also pings the event channel's socket every 20 seconds and gives requests a 15-second connect
+timeout and a 30-second idle timeout, so a connection a mobile network dropped without closing is
+noticed instead of waited on. There is deliberately no overall request deadline: file transfers
+share the client and stream. The OkHttp engine runs its own WebSocket and ignores the plugin's ping
+setting, so on Android configure it on the engine:
+
+```kotlin
+val engine = OkHttp.create { config { pingInterval(20, TimeUnit.SECONDS) } }
+```
+
 Tokens come from your session layer:
 
 ```kotlin
@@ -306,8 +316,11 @@ data class CollectionSyncState(
 )
 ```
 
-`collection.state` is a `StateFlow`; `scope.state` carries `Online | Offline | AuthRequired |
-Revoked`. Between the two, a status line ("3 changes waiting", "sign in to sync", "1 conflict") is a
+`collection.state` is a `StateFlow`; `scope.state` carries `Online | Offline | ServerUnreachable |
+AuthRequired | Revoked`. `Offline` and `ServerUnreachable` end on their own: the first push, log
+read or snapshot the server answers puts the scope back to `Online`, and so does the event channel
+reconnecting. `AuthRequired` ends the same way once the user has signed in again and the server
+accepts the new token; `Revoked` is final. Between the two, a status line ("3 changes waiting", "sign in to sync", "1 conflict") is a
 few lines of UI and no polling.
 
 When that status line says "3 changes waiting" and has been saying it for an hour, ask the

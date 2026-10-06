@@ -14,8 +14,15 @@ internal sealed class BootstrapOutcome {
      *
      * Resuming is cheap because the position inside the snapshot is stored as it goes: an
      * interrupted bootstrap continues from its last page rather than from the beginning.
+     *
+     * It carries what went wrong for the same reason a blocked pull does: the worker classifies it,
+     * and an unreachable server here is the scope losing its connection just as much as there.
+     *
+     * @property failure What the transport reported.
      */
-    data object Blocked : BootstrapOutcome()
+    data class Blocked(
+        val failure: SyncTransportFailure,
+    ) : BootstrapOutcome()
 
     /**
      * The collection was replaced on the server while it was being transferred.

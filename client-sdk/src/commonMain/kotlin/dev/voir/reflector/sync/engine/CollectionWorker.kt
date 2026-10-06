@@ -251,7 +251,12 @@ internal class CollectionWorker(
             // first cycle stayed "online" until it was restarted.
             is PullOutcome.Blocked -> recordFailure(outcome.failure)
 
-            PullOutcome.UpToDate -> lastFailure.value = null
+            // And the other half of the same report: a log read to its end is an answer from the
+            // server, whatever the socket or an earlier request said.
+            PullOutcome.UpToDate -> {
+                recordSuccess()
+                lastFailure.value = null
+            }
         }
         offerConflicts()
         reportQueue(startedAt)
@@ -499,14 +504,25 @@ internal class CollectionWorker(
         }
     }
 
+    /**
+     * Transfers a snapshot and reports what the attempt says about the scope's connection.
+     *
+     * @param coordinator Bootstrap to run.
+     * @return `true` when the collection follows the log again and the cycle may carry on.
+     */
     private suspend fun bootstrap(coordinator: BootstrapCoordinator): Boolean =
         when (val outcome = coordinator.bootstrap()) {
             BootstrapOutcome.Completed -> {
+                recordSuccess()
                 lastFailure.value = null
                 true
             }
 
-            BootstrapOutcome.Blocked -> {
+            // Classified like a blocked pull, because it is one: a collection that has never
+            // finished its snapshot reaches the server through nothing else, so leaving this out
+            // kept a device that lost its connection mid-transfer reporting itself online.
+            is BootstrapOutcome.Blocked -> {
+                recordFailure(outcome.failure)
                 false
             }
 
@@ -531,6 +547,7 @@ internal class CollectionWorker(
         while (true) {
             when (val outcome = push.pushOnce()) {
                 PushOutcome.Applied -> {
+                    recordSuccess()
                 }
 
                 PushOutcome.Idle -> {
@@ -637,10 +654,20 @@ internal class CollectionWorker(
         }
     }
 
+    /**
+     * Returns the server's limits, asking for them only until the first answer.
+     *
+     * @return The limits, or `null` when they could not be read and the cycle has to end here.
+     */
     private suspend fun limits(): SyncLimits? {
         limits?.let { return it }
         return try {
-            transport.limits().also { limits = it }
+            transport.limits().also {
+                limits = it
+                // Server-wide rather than the scope's, so it says the server answered and nothing
+                // about whether this user may still read the scope.
+                recordSuccess(provesAccess = false)
+            }
         } catch (failure: SyncTransportFailure) {
             log.warn(SyncLogEvent.REQUEST_FAILED, failure) {
                 "the server's limits could not be read, so nothing is sent or applied this cycle"
@@ -671,6 +698,35 @@ internal class CollectionWorker(
                 else -> ScopeState.AuthRequired
             }
         recordFailure(failure)
+    }
+
+    /**
+     * Records that the server answered, which is the only proof the scope is reachable again.
+     *
+     * Without this the scope's state could only return to [ScopeState.Online] through the event
+     * channel reconnecting. A request that failed during a blip the socket survived — a handover
+     * between networks, a device waking from sleep — or a stale request that failed after the socket
+     * had already come back, left the scope reporting an unreachable server for the rest of the
+     * process while every later cycle succeeded.
+     *
+     * Each move is a compare-and-set from one state, so a scope another worker or the channel has
+     * moved in the meantime is left where they put it, and [ScopeState.Revoked] is never left at all.
+     * A failure another collection records a moment later wins, which is the right way round: the
+     * state is about the most recent answer, and a wrongly reported connection corrects itself on
+     * the next request either way.
+     *
+     * @param provesAccess Whether the request was one only an accepted credential for this scope can
+     *   get answered: a push, a read of the log or a snapshot. Such an answer also ends
+     *   [ScopeState.AuthRequired] — it means the user signed in again and the application's token
+     *   provider now hands out a token the server takes, which is exactly the moment the queue kept
+     *   for them can leave. The server-wide limits say nothing about that and must not.
+     */
+    private fun recordSuccess(provesAccess: Boolean = true) {
+        scopeState.compareAndSet(ScopeState.Offline, ScopeState.Online)
+        scopeState.compareAndSet(ScopeState.ServerUnreachable, ScopeState.Online)
+        if (provesAccess) {
+            scopeState.compareAndSet(ScopeState.AuthRequired, ScopeState.Online)
+        }
     }
 
     /**

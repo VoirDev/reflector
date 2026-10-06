@@ -407,6 +407,97 @@ class SyncEngineTest {
         }
 
     @Test
+    fun `a server that answers again is reported online while the socket stays up`() =
+        runBlocking<Unit> {
+            transport.onSnapshot = { emptySnapshot() }
+            val signals = MutableSharedFlow<SyncChannelSignal>(replay = 1)
+            val channel =
+                object : SyncEventChannel {
+                    override fun signals(scope: ScopeId) = signals
+                }
+            signals.emit(SyncChannelSignal.Connected)
+            val scope = engine(workers, eventChannel = channel).scope(scopeId)
+            val collection = scope.collection(ledger)
+            collection.state.await("a live collection") { it.phase == SyncPhase.LIVE }
+
+            // A request lost to a blip the socket survived: a handover, a device waking from sleep.
+            transport.onChanges = { throw SyncTransportFailure.Unreachable("no answer") }
+            collection.requestSync()
+            scope.state.awaitState("a server that did not answer", ScopeState.ServerUnreachable)
+
+            // The socket never dropped, so it never announces a reconnect. Only the server
+            // answering can end the state, and it used to stay put until the process restarted.
+            transport.onChanges = { ChangesPage(emptyList(), nextCursor = null, hasMore = false, epoch = TEST_EPOCH) }
+            collection.requestSync()
+            scope.state.awaitState("a scope the server answers again", ScopeState.Online)
+        }
+
+    @Test
+    fun `a failure after the socket reconnected is cleared by the next successful cycle`() =
+        runBlocking<Unit> {
+            transport.onSnapshot = { emptySnapshot() }
+            val signals = MutableSharedFlow<SyncChannelSignal>(replay = 1)
+            val channel =
+                object : SyncEventChannel {
+                    override fun signals(scope: ScopeId) = signals
+                }
+            val scope = engine(workers, eventChannel = channel).scope(scopeId)
+            val collection = scope.collection(ledger)
+            collection.state.await("a live collection") { it.phase == SyncPhase.LIVE }
+
+            // The reconnect is processed first and the pull it wakes fails afterwards — a request
+            // still riding the old route. The failure is the last word, so the scope reports it.
+            transport.onChanges = { throw SyncTransportFailure.Unreachable("stale route") }
+            signals.emit(SyncChannelSignal.Connected)
+            scope.state.awaitState("the failure that followed the reconnect", ScopeState.ServerUnreachable)
+
+            transport.onChanges = { ChangesPage(emptyList(), nextCursor = null, hasMore = false, epoch = TEST_EPOCH) }
+            collection.requestSync()
+            scope.state.awaitState("a scope whose next cycle succeeded", ScopeState.Online)
+        }
+
+    @Test
+    fun `a snapshot that cannot reach the server is reported, and its completion ends the report`() =
+        runBlocking<Unit> {
+            var reachable = false
+            transport.onSnapshot = {
+                if (!reachable) throw SyncTransportFailure.Unreachable("the connection dropped")
+                emptySnapshot()
+            }
+            val scope = engine(workers).scope(scopeId)
+            val collection = scope.collection(ledger)
+
+            // A collection that has never finished its snapshot reaches the server through nothing
+            // else, so a blocked transfer has to say so just as a blocked pull does.
+            scope.state.awaitState("a transfer that did not arrive", ScopeState.ServerUnreachable)
+            collection.state.await("the failure reported to the collection") { it.lastFailure is SyncFailure.Network }
+
+            reachable = true
+            collection.requestSync()
+            collection.state.await("a live collection") { it.phase == SyncPhase.LIVE }
+            scope.state.awaitState("a scope whose snapshot arrived", ScopeState.Online)
+        }
+
+    @Test
+    fun `a scope that needed the user is online again once the server accepts its credentials`() =
+        runBlocking<Unit> {
+            transport.onSnapshot = { emptySnapshot() }
+            val scope = engine(workers).scope(scopeId)
+            val collection = scope.collection(ledger)
+            collection.state.await("a live collection") { it.phase == SyncPhase.LIVE }
+
+            transport.onChanges = { throw SyncTransportFailure.Unauthorized("the token has expired") }
+            collection.requestSync()
+            scope.state.awaitState("a scope that needs the user", ScopeState.AuthRequired)
+
+            // The user signed in again and the token provider now hands out a token the server
+            // takes. The queue was kept for exactly this moment; the state has to follow it.
+            transport.onChanges = { ChangesPage(emptyList(), nextCursor = null, hasMore = false, epoch = TEST_EPOCH) }
+            collection.requestSync()
+            scope.state.awaitState("a scope whose credentials were accepted", ScopeState.Online)
+        }
+
+    @Test
     fun `refused credentials are reported as needing the user, not as a server error`() =
         runBlocking<Unit> {
             transport.onSnapshot = { throw SyncTransportFailure.Unauthorized("the token has expired") }

@@ -191,7 +191,7 @@ class KtorBlobTransportTest {
         }
 
     @Test
-    fun `a storage refusal names the storage's status and error code, never the scope`() =
+    fun `a storage refusal names the storage's status and error code never the scope`() =
         runTest {
             val transport =
                 transport {

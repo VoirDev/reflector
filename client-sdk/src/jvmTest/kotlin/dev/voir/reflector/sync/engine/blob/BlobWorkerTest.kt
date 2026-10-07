@@ -141,8 +141,10 @@ class BlobWorkerTest {
         )
     }
 
-    private suspend fun stateOf(blobId: BlobId) =
-        transactions.transaction { stores.blobs.find(scopeId, ledger, blobId)?.state }
+    private suspend fun stateOf(blobId: BlobId) = recordOf(blobId)?.state
+
+    private suspend fun recordOf(blobId: BlobId) =
+        transactions.transaction { stores.blobs.find(scopeId, ledger, blobId) }
 
     private suspend fun attach(
         binding: BlobBinding = BlobBinding.DEFERRED,
@@ -342,11 +344,112 @@ class BlobWorkerTest {
 
             // The ordinary state of an attachment whose record arrived ahead of its bytes. It is
             // answered by waiting, and must never be reported to the application as a failure.
-            await("the file being waited for") {
-                transactions.transaction { stores.blobs.find(scopeId, ledger, photo)?.attempts ?: 0 } > 0
-            }
-            assertEquals(BlobTransferState.REMOTE, stateOf(photo))
+            await("the file being waited for") { recordOf(photo)?.nextRetryAt != null }
+            val record = assertNotNull(recordOf(photo))
+            assertEquals(BlobTransferState.REMOTE, record.state)
+            assertEquals("the server does not have the bytes yet", record.lastError)
+            // Not an attempt. Counting these let a device give a receipt up a minute after it was
+            // attached, while the phone that took it was still on its way to a network.
+            assertEquals(0, record.attempts)
             assertTrue(files.failures.isEmpty())
+        }
+
+    @Test
+    fun `an upload that keeps failing is never given up on while its bytes are here`() =
+        runBlocking<Unit> {
+            blobs.failWith = SyncTransportFailure.ServerError(403, "the storage refused the upload: 403 AccessDenied")
+            attach()
+            await("the first failure being recorded") { (recordOf(photo)?.attempts ?: 0) > 0 }
+
+            // Brought to the attempt that used to be the last one, and made due at once rather than
+            // waiting out the backoff that got it there.
+            transactions.transaction {
+                repeat(3) { stores.blobs.recordFailure(scopeId, ledger, photo, "failed", nextRetryAt = 0) }
+            }
+            collection().requestSync()
+
+            await("the attempt that used to give up") { (recordOf(photo)?.attempts ?: 0) >= 5 }
+            // Still queued for another attempt. Every other device has had the record naming this
+            // file since it was registered, and giving up here would leave them waiting forever.
+            assertEquals(BlobTransferState.LOCAL, stateOf(photo))
+            assertTrue(files.failures.isEmpty())
+        }
+
+    @Test
+    fun `an upload refused after registering keeps counting its attempts`() =
+        runBlocking<Unit> {
+            // Registered every time, refused by the storage every time — a misconfigured bucket.
+            // Each retry used to move the row into UPLOADING again, which forgot the attempts, so
+            // the backoff never grew and the file was sent again every second or two.
+            blobs.holdUploads = true
+            attach()
+
+            // No cycle runs after the first here — there is no timer and nobody asks — so the
+            // second attempt also shows the worker waking itself when its backoff runs out.
+            await("a second failure being counted") { (recordOf(photo)?.attempts ?: 0) >= 2 }
+            assertEquals(BlobTransferState.UPLOADING, stateOf(photo))
+        }
+
+    @Test
+    fun `asking to try again restarts an upload that was given up on`() =
+        runBlocking<Unit> {
+            blobs.failWith = SyncTransportFailure.Unreachable("the connection dropped")
+            attach()
+            await("the first failure being recorded") { (recordOf(photo)?.attempts ?: 0) > 0 }
+            transactions.transaction {
+                stores.blobs.setState(scopeId, ledger, photo, BlobTransferState.UNAVAILABLE)
+            }
+            blobs.failWith = null
+
+            collection().retry(photo)
+
+            await("the file reaching the server") { stateOf(photo) == BlobTransferState.UPLOADED }
+        }
+
+    @Test
+    fun `an upload given up on earlier is sent again when the worker starts`() =
+        runBlocking<Unit> {
+            blobs.failWith = SyncTransportFailure.Unreachable("the connection dropped")
+            attach()
+            await("the first failure being recorded") { (recordOf(photo)?.attempts ?: 0) > 0 }
+            // What an earlier version of the library left behind: an upload abandoned after a few
+            // attempts with its bytes still on the device, and nothing that would ever try it again.
+            workers.cancel()
+            transactions.transaction {
+                stores.blobs.setState(scopeId, ledger, photo, BlobTransferState.UNAVAILABLE)
+            }
+            blobs.failWith = null
+
+            val restarted = CoroutineScope(Dispatchers.Default + SupervisorJob())
+            try {
+                SyncEngine(
+                    database = database,
+                    transactions = transactions,
+                    transport = transport,
+                    adapters = mapOf<CollectionId, CollectionAdapter>(ledger to adapter),
+                    coroutineScope = restarted,
+                    blobStore = files,
+                    blobTransport = blobs,
+                    triggerSources = emptyList(),
+                ).scope(scopeId).collection(ledger).requestSync()
+
+                await("the file reaching the server") { stateOf(photo) == BlobTransferState.UPLOADED }
+            } finally {
+                restarted.cancel()
+            }
+        }
+
+    @Test
+    fun `a screen listing files sees every file a document names`() =
+        runBlocking<Unit> {
+            attach()
+            await("the file reaching the server") { stateOf(photo) == BlobTransferState.UPLOADED }
+
+            val listed = collection().blobs.first()
+
+            assertEquals(setOf(photo), listed.keys)
+            assertEquals(BlobTransferState.UPLOADED, listed.getValue(photo).state)
+            assertEquals(0, listed.getValue(photo).attempts)
         }
 
     private fun changesNamingPhoto() =

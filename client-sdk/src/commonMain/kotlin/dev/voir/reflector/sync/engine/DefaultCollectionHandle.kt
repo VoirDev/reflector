@@ -18,6 +18,7 @@ import dev.voir.reflector.sync.engine.conflict.ConflictCoordinator
 import dev.voir.reflector.sync.engine.mutation.MutationCoordinator
 import dev.voir.reflector.sync.persistence.SyncStores
 import dev.voir.reflector.sync.persistence.SyncTransactionRunner
+import dev.voir.reflector.sync.persistence.blob.BlobRecord
 import dev.voir.reflector.sync.persistence.conflict.StoredConflict
 import dev.voir.reflector.sync.persistence.group.PendingGroup
 import dev.voir.reflector.sync.protocol.BlobId
@@ -95,16 +96,11 @@ internal class DefaultCollectionHandle(
         )
 
     override fun blob(id: BlobId): Flow<BlobSyncState?> =
-        stores.blobs.observe(scope, collection, id).map { record ->
-            record?.let {
-                BlobSyncState(
-                    state = it.state,
-                    wanted = it.wanted,
-                    size = it.stat?.size,
-                    transferred = it.transferred,
-                    lastError = it.lastError,
-                )
-            }
+        stores.blobs.observe(scope, collection, id).map { record -> record?.toSyncState() }
+
+    override val blobs: Flow<Map<BlobId, BlobSyncState>> =
+        stores.blobs.observeReferenced(scope, collection).map { records ->
+            records.associate { record -> record.blobId to record.toSyncState() }
         }
 
     override val conflicts: Flow<List<Conflict>> =
@@ -118,6 +114,10 @@ internal class DefaultCollectionHandle(
 
     override suspend fun evict(id: BlobId) {
         worker.evictBlob(id)
+    }
+
+    override suspend fun retry(id: BlobId) {
+        worker.retryBlob(id)
     }
 
     override suspend fun <R> mutate(block: suspend MutationScope.() -> R): R {
@@ -243,6 +243,16 @@ internal class DefaultCollectionHandle(
         } else {
             stored
         }
+
+    private fun BlobRecord.toSyncState(): BlobSyncState =
+        BlobSyncState(
+            state = state,
+            wanted = wanted,
+            size = stat?.size,
+            transferred = transferred,
+            lastError = lastError,
+            attempts = attempts,
+        )
 
     private fun StoredConflict.toConflict(): Conflict =
         Conflict(

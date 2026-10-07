@@ -1,6 +1,7 @@
 package dev.voir.reflector.sync.core
 
 import dev.voir.reflector.sync.core.blob.BlobSyncState
+import dev.voir.reflector.sync.core.blob.BlobTransferState
 import dev.voir.reflector.sync.core.conflict.Conflict
 import dev.voir.reflector.sync.core.conflict.ConflictId
 import dev.voir.reflector.sync.core.conflict.Resolution
@@ -63,6 +64,20 @@ public interface CollectionHandle {
     public fun blob(id: BlobId): Flow<BlobSyncState?>
 
     /**
+     * Publishes the progress of every file some document of this collection still points at.
+     *
+     * For a screen that reports on files rather than drawing one — what is still on its way out,
+     * what is arriving, what keeps failing. Files nothing references any more are left out: they
+     * are on their way to being offered back to the application and are not the owner's to worry
+     * about.
+     *
+     * The same caveats as [blob] apply to each entry: [BlobTransferState.REMOTE] and
+     * [BlobTransferState.DOWNLOADING] are ordinary, and a [BlobSyncState.lastError] on a file that
+     * is still moving is a failed attempt with another one coming.
+     */
+    public val blobs: Flow<Map<BlobId, BlobSyncState>>
+
+    /**
      * Asks for a file's bytes to be brought to this device.
      *
      * What a screen calls when it opens a record whose file was left behind under
@@ -108,6 +123,21 @@ public interface CollectionHandle {
      * @param id File to give up.
      */
     public suspend fun evict(id: BlobId)
+
+    /**
+     * Tries a file again now, whichever way it was moving.
+     *
+     * The call behind a "try again" button on a screen listing files. A file given up on —
+     * [BlobTransferState.UNAVAILABLE] — starts again from zero attempts: as an upload when this
+     * device holds its bytes, as a download otherwise. A file still moving has its backoff cut short
+     * and its attempts forgotten, which is the difference from [fetch]: a person asking is a reason
+     * to try sooner, a screen redrawing itself is not.
+     *
+     * A file the library has never heard of, or one already where it belongs, is left alone.
+     *
+     * @param id File to try again.
+     */
+    public suspend fun retry(id: BlobId)
 
     /**
      * Runs a block of local changes as one transaction of the application's database.

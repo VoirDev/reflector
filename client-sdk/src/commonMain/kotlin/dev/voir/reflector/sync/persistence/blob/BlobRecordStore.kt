@@ -174,6 +174,40 @@ internal class BlobRecordStore(
     }
 
     /**
+     * Records that a file's bytes are not there yet and when to look again, without counting it.
+     *
+     * @param scope Scope of the file.
+     * @param collection Collection of the file.
+     * @param blobId Identifier of the file.
+     * @param error Why the file could not be moved yet.
+     * @param nextRetryAt When to look again.
+     */
+    suspend fun recordWait(
+        scope: ScopeId,
+        collection: CollectionId,
+        blobId: BlobId,
+        error: String,
+        nextRetryAt: Long,
+    ) {
+        dao.recordWait(scope.value, collection.value, blobId.value, error, nextRetryAt)
+    }
+
+    /**
+     * Forgets the attempts a file has used and any backoff it is serving, keeping its state.
+     *
+     * @param scope Scope of the file.
+     * @param collection Collection of the file.
+     * @param blobId Identifier of the file.
+     */
+    suspend fun resetAttempts(
+        scope: ScopeId,
+        collection: CollectionId,
+        blobId: BlobId,
+    ) {
+        dao.resetAttempts(scope.value, collection.value, blobId.value)
+    }
+
+    /**
      * Records how much of a transfer has moved.
      *
      * @param scope Scope of the file.
@@ -209,6 +243,20 @@ internal class BlobRecordStore(
     ): List<BlobRecord> = dao.waiting(scope.value, collection.value, state, now, limit).map { it.toRecord() }
 
     /**
+     * Finds when the next file serving a backoff becomes due.
+     *
+     * @param scope Scope to read.
+     * @param collection Collection to read.
+     * @param now Current moment, in epoch milliseconds.
+     * @return The earliest moment one becomes due, or `null` when none is waiting on a backoff.
+     */
+    suspend fun nextRetryAt(
+        scope: ScopeId,
+        collection: CollectionId,
+        now: Long,
+    ): Long? = dao.nextRetryAt(scope.value, collection.value, now)
+
+    /**
      * Counts files waiting for a transfer in one direction.
      *
      * @param scope Scope to count in.
@@ -221,6 +269,19 @@ internal class BlobRecordStore(
         collection: CollectionId,
         state: BlobTransferState,
     ): Flow<Int> = dao.observeCount(scope.value, collection.value, state)
+
+    /**
+     * Publishes every file some document still points at.
+     *
+     * @param scope Scope to read.
+     * @param collection Collection to read.
+     * @return Referenced files, in the order the library learned of them.
+     */
+    fun observeReferenced(
+        scope: ScopeId,
+        collection: CollectionId,
+    ): Flow<List<BlobRecord>> =
+        dao.observeReferenced(scope.value, collection.value).map { rows -> rows.map { it.toRecord() } }
 
     /**
      * Reads files no document points at any more.

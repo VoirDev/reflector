@@ -3,9 +3,8 @@ package dev.voir.reflector.sync.core.blob
 /**
  * Progress of one file, as a user interface reads it.
  *
- * Published per file rather than as a list of every file in a collection, because the one screen
- * that needs this already knows which identifier it is drawing: a photograph in a list binds to its
- * own state and nothing else.
+ * Published per file for a screen drawing one, and as a whole collection's worth through
+ * [dev.voir.reflector.sync.core.CollectionHandle.blobs] for a screen that reports on all of them.
  *
  * Between them [state] and [wanted] cover every case a screen has to draw, which is why both are
  * here: the state says where the bytes are, and the flag says whether this device is trying to get
@@ -35,6 +34,9 @@ package dev.voir.reflector.sync.core.blob
  *   a value here while the state is still moving means an attempt failed and another is coming, and
  *   a screen that treated it as final would tell the user a photograph was lost every time a train
  *   went into a tunnel.
+ * @property attempts Attempts that have failed since the transfer last started from zero. An upload
+ *   is never given up on while its bytes are here, so this — not the state — is what says one keeps
+ *   failing. Waiting for a file that another device has not finished sending is not counted.
  */
 public data class BlobSyncState(
     public val state: BlobTransferState,
@@ -42,4 +44,5 @@ public data class BlobSyncState(
     public val size: Long?,
     public val transferred: Long,
     public val lastError: String?,
+    public val attempts: Int,
 )

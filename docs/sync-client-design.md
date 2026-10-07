@@ -465,7 +465,8 @@ cursor := NULL, epoch := NULL, bootstrap_page := NULL, phase := RESYNC_REQUIRED
 then the ordinary bootstrap, whose sweep deletes every application row the new snapshot omits
 ```
 
-**Unsent local changes are discarded, and this is the only place the library does that.** A
+**Unsent local changes are discarded, and this is the only place the library does that on its
+own.** A
 conflict is a disagreement between two versions of an entity; after a purge there is no other
 version to disagree with, and keeping the edits would mean deciding, against an explicit erasure,
 that this device's copy wins. The server is the source of truth and the truth is that there is
@@ -490,6 +491,52 @@ nothing to apply, the record stays dirty and goes out with a push. If the versio
 the server has moved ahead, and this is a full conflict with `origin = PULL`: applying the
 snapshot would mean throwing the user's edit away, and staying silent would mean later sending
 our version on top of a state nobody ever saw.
+
+### The user gives up: `discardLocalChanges()`
+
+A group the server refused for good blocks the queue until the data changes. When nobody can make
+the data acceptable, the way out is to throw this device's unsent work away. Only the application
+can decide that, so the library offers it and never does it unprompted. `requestResync()` is not the
+same thing: it keeps unsent changes, and the refused group is refused again after it.
+
+```
+in one transaction, before the call returns:
+  rows of dirty records with server_version = NULL := deleted through applyRemote(Delete)
+  those records and their file references         := deleted
+  groups, conflicts, inbox for this collection    := deleted
+  every remaining record := clean; server_version := NULL where it held a change, kept otherwise
+  phase := RESYNC_REQUIRED
+then the ordinary bootstrap, in the next cycle
+```
+
+**It happens when it is called, not when the worker next gets to it.** A request held in memory
+until the next cycle is lost with the process, and a device without a connection may not run a
+useful cycle for days — the user who pressed "discard" would go on seeing the change they threw
+away. So the discard is a transaction of its own, run while the worker is held off: it cancels the
+cycle running at the time and takes the lock the worker runs its cycles under. Cancelling is safe for
+the same reason a process death is: everything a cycle writes is written in transactions. Waiting
+instead would tie the call to whatever the cycle was doing — a long snapshot, a request waiting out a
+timeout. What the call covers is exactly what was unsent when it was made; an edit made after it
+returns is new work and is kept. It cannot be called from inside the adapter, which runs inside the
+cycle it would be waiting for, and it says so rather than cancelling itself.
+
+**What the server never had is removed at once.** A dirty record with no confirmed version stands
+for an entity the server does not hold, so the server's state of it — absent — is known without
+asking. Its row is deleted through `applyRemote` as a server deletion would be, its record and its
+file references with it. A creation whose acknowledgement was lost is among them; the snapshot
+brings it back, because the server does have it.
+
+**What the server does have waits for the snapshot.** The library holds no entity bodies, so an
+edit or a deletion of something the server holds can only be undone with the server's copy. Those
+rows show the discarded change until the bootstrap overwrites or restores them, and the phase says
+so meanwhile: the discard is complete when the collection is `LIVE` again.
+
+**An edit made in that window is a conflict.** It is made on top of a row that still shows the
+discarded change, so pushing it against the version it was confirmed at would hand the server the
+discarded change after all. That is why such a record loses its `server_version` in the discard:
+the snapshot then finds a dirty record whose version does not match and opens a conflict, and a push
+that goes out first claims no base version and is refused for the same reason. A record that held no
+change keeps its version, so an edit to an entity the discard did not touch is an ordinary edit.
 
 ## 9. Transport and triggers
 
@@ -773,6 +820,8 @@ interface CollectionHandle {
     suspend fun <R> mutate(block: suspend MutationScope.() -> R): R   // = withTransaction
     suspend fun requestSync()
     suspend fun requestResync()                // drop the cursor and fetch the snapshot again
+    val refusals: Flow<List<RefusedGroup>>     // groups refused for good, read from storage
+    suspend fun discardLocalChanges()          // drop unsent work now, rebuild from the server; §8
     suspend fun resolve(conflictId: ConflictId, resolution: Resolution)
 }
 

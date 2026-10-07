@@ -15,7 +15,20 @@ import dev.voir.reflector.sync.protocol.push.RejectError
  * @receiver Refusal as the server reported it.
  * @return Reason in the application's terms.
  */
-internal fun RejectError.toRejection(): SyncRejection =
+internal fun RejectError.toRejection(): SyncRejection = rejectionOf(code, message)
+
+/**
+ * The same translation, for a refusal read back from storage as its code and its message.
+ *
+ * @param code Refusal code as it arrived on the wire, or as the library chose it for a refusal it
+ *   made itself.
+ * @param message Explanation that came with it.
+ * @return Reason in the application's terms.
+ */
+internal fun rejectionOf(
+    code: RejectCode,
+    message: String,
+): SyncRejection =
     when (code) {
         RejectCode.VALIDATION -> SyncRejection.Validation(message)
         RejectCode.UNKNOWN_ENTITY_TYPE -> SyncRejection.UnknownEntityType(message)

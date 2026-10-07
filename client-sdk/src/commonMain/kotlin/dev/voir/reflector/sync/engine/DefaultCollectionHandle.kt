@@ -4,6 +4,7 @@ import dev.voir.reflector.sync.core.CollectionHandle
 import dev.voir.reflector.sync.core.CollectionSyncState
 import dev.voir.reflector.sync.core.ConflictThreshold
 import dev.voir.reflector.sync.core.MutationScope
+import dev.voir.reflector.sync.core.RefusedGroup
 import dev.voir.reflector.sync.core.SyncPhase
 import dev.voir.reflector.sync.core.blob.BlobSyncState
 import dev.voir.reflector.sync.core.blob.BlobTransferState
@@ -109,6 +110,8 @@ internal class DefaultCollectionHandle(
     override val conflicts: Flow<List<Conflict>> =
         stores.conflicts.observe(scope, collection).map { stored -> stored.map { it.toConflict() } }
 
+    override val refusals: Flow<List<RefusedGroup>> = stores.groups.observeRefused(scope, collection)
+
     override suspend fun fetch(id: BlobId) {
         worker.fetchBlob(id)
     }
@@ -137,6 +140,10 @@ internal class DefaultCollectionHandle(
             stores.collections.setPhase(scope, collection, SyncPhase.RESYNC_REQUIRED)
         }
         worker.requestSync()
+    }
+
+    override suspend fun discardLocalChanges() {
+        worker.discardLocalChanges()
     }
 
     override suspend fun resolve(

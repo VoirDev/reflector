@@ -1,8 +1,15 @@
 package dev.voir.reflector.sync.persistence.group
 
+import dev.voir.reflector.sync.core.RefusedGroup
+import dev.voir.reflector.sync.engine.push.rejectionOf
 import dev.voir.reflector.sync.protocol.CollectionId
+import dev.voir.reflector.sync.protocol.EntityId
+import dev.voir.reflector.sync.protocol.EntityType
 import dev.voir.reflector.sync.protocol.GroupId
 import dev.voir.reflector.sync.protocol.ScopeId
+import dev.voir.reflector.sync.protocol.push.RejectCode
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.map
 
 /**
  * Typed access to the push queue.
@@ -121,6 +128,59 @@ internal class GroupStore(
     ) {
         dao.recordAttempt(groupId.value, state, nextRetryAt, error)
     }
+
+    /**
+     * Fails a group for good and records the refusal that failed it.
+     *
+     * @param groupId Group that was refused.
+     * @param error Description of the refusal.
+     * @param code Wire code of the refusal, or the one the library chose for a refusal of its own.
+     * @param entityType Entity type the refusal named, or `null` when it named the group.
+     * @param entityId Entity the refusal named, or `null` when it named the group.
+     */
+    public suspend fun recordRefusal(
+        groupId: GroupId,
+        error: String,
+        code: RejectCode,
+        entityType: EntityType?,
+        entityId: EntityId?,
+    ) {
+        dao.recordRefusal(
+            groupId = groupId.value,
+            state = PushGroupState.FAILED,
+            error = error,
+            code = code.value,
+            entityType = entityType?.value,
+            entityId = entityId?.value,
+        )
+    }
+
+    /**
+     * Follows the groups of a collection that were refused for good.
+     *
+     * @param scope Scope of the collection.
+     * @param collection Identifier of the collection.
+     * @return The refused groups in queue order, each with the refusal that failed it.
+     */
+    public fun observeRefused(
+        scope: ScopeId,
+        collection: CollectionId,
+    ): Flow<List<RefusedGroup>> =
+        dao.observeInState(scope.value, collection.value, PushGroupState.FAILED).map { groups ->
+            groups.map { group ->
+                RefusedGroup(
+                    groupId = GroupId(group.groupId),
+                    entityType = group.rejectEntityType?.let(::EntityType),
+                    entityId = group.rejectEntityId?.let(::EntityId),
+                    // A group failed before refusals were recorded carries no code. It is still
+                    // refused, and "a code this build does not know" is the honest name for that.
+                    rejection = rejectionOf(
+                        code = RejectCode(group.rejectCode.orEmpty()),
+                        message = group.lastError.orEmpty(),
+                    ),
+                )
+            }
+        }
 
     /**
      * Moves a group to another position in the queue.

@@ -343,7 +343,7 @@ the case where nobody was watching when it happened.
 stack, which is the only part of it worth having — and the two failures the protocol names are
 reported as themselves rather than as a status code standing in for them. `Rejected` is the one to
 watch: it means the server refused a change permanently, the collection's queue is blocked on it,
-and nothing will leave the device until you rewrite that data.
+and nothing will leave the device until you rewrite that data or [discard it](#refused-changes).
 
 `NEEDS_ATTENTION` is the phase to notice. It replaces `LIVE` once open conflicts reach the engine's
 `conflictThreshold` (`ConflictThreshold.Default`, 20), and it means what it says: a conflict blocks
@@ -368,6 +368,61 @@ collection.resolve(conflict.id, Resolution.Merged(mergedDocument))
 
 `local` and `server` are the two documents, so the screen can show a real diff rather than "there
 was a conflict".
+
+## Refused changes
+
+A conflict is a disagreement the user can settle. A refusal is not: the server looked at a change
+and said no for good — it fails validation, it is too large, its type is not one the server knows. The
+group that carried it stays at the head of the queue, and since the queue is strictly in order,
+nothing behind it leaves the device either.
+
+The adapter's `onRejected` is told once, at the moment it happens. `refusals` is the same answer
+read back from storage, so it is still there after a restart:
+
+```kotlin
+collection.refusals.collect { refused ->
+    // RefusedGroup(groupId, entityType, entityId, rejection) — usually one: the head of the queue
+}
+```
+
+There are two ways out. **Change the data**: an edit to the refused entity moves it into a new group,
+and the queue moves on. **Or give up on it**:
+
+```kotlin
+collection.discardLocalChanges()
+```
+
+This throws away *everything* this device has not sent — not just the refused group — and rebuilds
+the collection from the server. Ask the user first; the library never does this on its own.
+
+What is done by the time the call returns, in one transaction and without needing a connection:
+
+- the queue, the open conflicts and every pending edit are gone, and `pendingCount` is `0`;
+- entities created on this device that the server never confirmed are deleted, through your
+  adapter's `applyRemote`, as the server's own deletions are;
+- the phase is `RESYNC_REQUIRED`, written in the same transaction, so a process that dies straight
+  afterwards still rebuilds;
+- a cycle that was running is cancelled rather than waited for.
+
+What is left for the snapshot that follows: an entity the server does have — one edited or deleted
+here — can only be put back from the server's copy. Until the snapshot arrives those rows still show
+the discarded change, which on a device without a connection can be a while. **The discard is
+finished when the phase is `LIVE` again**, not when the call returns:
+
+```kotlin
+collection.discardLocalChanges()
+collection.state.first { it.phase == SyncPhase.LIVE }   // rows now match the server
+```
+
+Changes made after the call returns are new changes and are kept. One made to a row that is still
+showing a discarded change is built on top of it, so it is not pushed as an edit of the server's
+copy: the snapshot opens a conflict for it, and the user picks a side as for any other. If you would
+rather that never happened, keep those screens read-only until the phase is `LIVE`.
+
+Files only this device held go with the documents that pointed at them.
+
+Call it from your user interface, not from inside the adapter: it waits for the running cycle to
+stop, and `onRejected` runs inside that cycle, so the call throws `IllegalStateException` there.
 
 ## Triggers
 
@@ -492,4 +547,5 @@ adapter. The whole of it — bindings, fetch policies and what your screens have
 6. A `TokenProvider` that can actually refresh.
 7. Trigger sources for foreground and connectivity — the timer alone is a floor, not a plan.
 8. A resync path for your own schema migrations.
-9. If you synchronise files: the [files checklist](files-guide.md#checklist).
+9. A screen for `refusals`, with `discardLocalChanges()` behind a confirmation.
+10. If you synchronise files: the [files checklist](files-guide.md#checklist).

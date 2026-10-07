@@ -29,6 +29,17 @@ public interface CollectionHandle {
     public val conflicts: Flow<List<Conflict>>
 
     /**
+     * Groups of local changes the server refused for good, and what it objected to.
+     *
+     * Read from storage, so it survives a restart: the adapter's `onRejected` is told once, at the
+     * moment of the refusal, while the group stays at the head of the queue — blocking everything
+     * behind it — until the data changes or [discardLocalChanges] throws it away. This is what an
+     * interface lists when it has to say what cannot be synced and why. Empty while nothing is
+     * refused.
+     */
+    public val refusals: Flow<List<RefusedGroup>>
+
+    /**
      * Publishes the progress of one file.
      *
      * What a photograph in a list binds to, and per file rather than as a list of every file in the
@@ -131,6 +142,37 @@ public interface CollectionHandle {
      * it. Local changes that never reached the server survive: they are pushed afterwards.
      */
     public suspend fun requestResync()
+
+    /**
+     * Throws away every change this device has not managed to send, and rebuilds the collection
+     * from the server.
+     *
+     * The way out of a queue the server keeps refusing. [requestResync] cannot be it: it keeps the
+     * unsent changes and pushes them again afterwards, so a group the server refused is refused
+     * again and everything behind it stays where it was. Only the user can decide that what this
+     * device holds is worth less than a working queue, which is why the library never does this on
+     * its own — except for a purged collection, where there is nothing left to keep the changes for.
+     *
+     * The discard happens before this returns, in one transaction, with or without a connection: the
+     * queue, the open conflicts and the pending edits are gone, [CollectionSyncState.pendingCount]
+     * drops to zero, and entities created on this device that the server never confirmed are deleted
+     * through the adapter at once. A cycle running at the time is cancelled rather than waited for.
+     * Changes made after this returns are new changes and are kept.
+     *
+     * What the server does have — an entity edited or deleted here — needs the server's copy, so
+     * those rows still show the discarded change until the snapshot that follows overwrites or
+     * restores them. Until then [CollectionSyncState.phase] stays [SyncPhase.RESYNC_REQUIRED] or
+     * [SyncPhase.BOOTSTRAPPING]; the discard is complete when it is [SyncPhase.LIVE] again. An edit
+     * made to such a row in the meantime is made on top of the discarded change, so it is not pushed
+     * as though it were based on the server's state: the snapshot opens a conflict for it instead.
+     * Files that only this device held go with the documents that pointed at them.
+     *
+     * Must not be called from inside the adapter's callbacks: it waits for the running cycle to stop,
+     * and they run inside that cycle.
+     *
+     * @throws IllegalStateException When called from inside one of the adapter's callbacks.
+     */
+    public suspend fun discardLocalChanges()
 
     /**
      * Applies a decision to a conflict that was waiting for the application.

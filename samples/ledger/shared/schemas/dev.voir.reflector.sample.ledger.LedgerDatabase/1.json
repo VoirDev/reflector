@@ -2,7 +2,7 @@
   "formatVersion": 1,
   "database": {
     "version": 1,
-    "identityHash": "c333849169309fcfca63471ace3f053d",
+    "identityHash": "5a0e832b4cbfb7a06eea40b2d2026957",
     "entities": [
       {
         "tableName": "wallet",
@@ -261,7 +261,7 @@
       },
       {
         "tableName": "sync_group",
-        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`group_id` BLOB NOT NULL, `scope_id` TEXT NOT NULL, `collection_id` TEXT NOT NULL, `ord` INTEGER NOT NULL, `state` TEXT NOT NULL, `attempts` INTEGER NOT NULL, `next_retry_at` INTEGER, `dependency_merges` INTEGER NOT NULL, `last_error` TEXT, PRIMARY KEY(`group_id`))",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`group_id` BLOB NOT NULL, `scope_id` TEXT NOT NULL, `collection_id` TEXT NOT NULL, `ord` INTEGER NOT NULL, `state` TEXT NOT NULL, `attempts` INTEGER NOT NULL, `next_retry_at` INTEGER, `dependency_merges` INTEGER NOT NULL, `last_error` TEXT, `reject_code` TEXT, `reject_entity_type` TEXT, `reject_entity_id` BLOB, PRIMARY KEY(`group_id`))",
         "fields": [
           {
             "fieldPath": "groupId",
@@ -314,6 +314,21 @@
             "fieldPath": "lastError",
             "columnName": "last_error",
             "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "rejectCode",
+            "columnName": "reject_code",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "rejectEntityType",
+            "columnName": "reject_entity_type",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "rejectEntityId",
+            "columnName": "reject_entity_id",
+            "affinity": "BLOB"
           }
         ],
         "primaryKey": {
@@ -735,7 +750,7 @@
     ],
     "setupQueries": [
       "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
-      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'c333849169309fcfca63471ace3f053d')"
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '5a0e832b4cbfb7a06eea40b2d2026957')"
     ]
   }
 }

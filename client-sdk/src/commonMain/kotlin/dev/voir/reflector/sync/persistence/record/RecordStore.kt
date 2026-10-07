@@ -341,6 +341,45 @@ internal class RecordStore(
     }
 
     /**
+     * Returns the dirty records the server has never confirmed.
+     *
+     * @param scope Scope of the collection.
+     * @param collection Identifier of the collection.
+     * @return Records whose entities exist only on this device.
+     */
+    public suspend fun unconfirmed(
+        scope: ScopeId,
+        collection: CollectionId,
+    ): List<RecordState> = dao.unconfirmed(scope.value, collection.value).map { it.toState() }
+
+    /**
+     * Removes the dirty records the server has never confirmed.
+     *
+     * @param scope Scope of the collection.
+     * @param collection Identifier of the collection.
+     */
+    public suspend fun deleteUnconfirmed(
+        scope: ScopeId,
+        collection: CollectionId,
+    ) {
+        dao.deleteUnconfirmed(scope.value, collection.value)
+    }
+
+    /**
+     * Drops every local change of a collection the server still holds, keeping the confirmed
+     * version of every record that held none.
+     *
+     * @param scope Scope of the collection.
+     * @param collection Collection whose local changes are abandoned.
+     */
+    public suspend fun abandonLocalChanges(
+        scope: ScopeId,
+        collection: CollectionId,
+    ) {
+        dao.abandonLocalChanges(scope.value, collection.value)
+    }
+
+    /**
      * Removes the metadata of one entity.
      *
      * @param scope Scope of the record.

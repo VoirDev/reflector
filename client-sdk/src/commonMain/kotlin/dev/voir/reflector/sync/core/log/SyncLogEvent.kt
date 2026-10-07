@@ -144,6 +144,23 @@ public enum class SyncLogEvent(
     BLOB_TRANSFER_FAILED(SyncLogSource.BLOBS),
 
     /**
+     * An upload has failed as many times as a download is allowed to before being given up on, and
+     * is still being tried.
+     *
+     * Recorded once, as a warning, because it is the moment a failure stops looking like a passing
+     * network and starts looking like something nobody will notice otherwise: an upload is never
+     * given up on while its bytes are here, so without this line a bucket refusing every request
+     * would be visible only at debug level.
+     */
+    BLOB_UPLOAD_STUCK(SyncLogSource.BLOBS),
+
+    /**
+     * A file was put back to work: asked to be tried again, or found given up on while its bytes are
+     * still on this device.
+     */
+    BLOB_RETRIED(SyncLogSource.BLOBS),
+
+    /**
      * A file will not arrive, and the application has been told.
      *
      * The end of the line for one file, from either direction: bytes that are gone from this device

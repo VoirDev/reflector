@@ -22,13 +22,16 @@ import dev.voir.reflector.sync.protocol.blob.BlobDescriptor
 import dev.voir.reflector.sync.protocol.blob.BlobState
 import dev.voir.reflector.sync.protocol.config.BlobLimits
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.launch
 import kotlin.time.Clock
+import kotlin.time.Duration.Companion.minutes
 
 /**
  * Moves the bytes, beside the cycle rather than inside it.
@@ -59,7 +62,8 @@ import kotlin.time.Clock
  *   without this a record would sit until the next timer, which on a device nobody touches is
  *   however long that is.
  * @property backoff Delay policy for transfers that failed.
- * @property maxAttempts Transfers tried before a file is given up on.
+ * @property maxAttempts Failed attempts before a download is given up on, and after which an upload
+ *   that keeps failing is reported.
  */
 internal class BlobWorker(
     private val scope: ScopeId,
@@ -80,9 +84,18 @@ internal class BlobWorker(
     /** Pending requests to look for work; conflated, since one pass answers any number of them. */
     private val requests = Channel<Unit>(Channel.CONFLATED)
 
+    /** The sleep until the next backoff runs out; replaced each time the worker runs dry. */
+    private var wake: Job? = null
+
     /** Starts the loop. Cancelling the coroutine scope stops it. */
     fun start() {
         coroutineScope.launch {
+            runCatching { resumeGivenUpUploads() }
+                .onFailure { failure ->
+                    log.error(SyncLogEvent.BLOB_TRANSFER_FAILED, failure) {
+                        "files given up on could not be looked at; they wait for somebody to ask again"
+                    }
+                }
             for (request in requests) {
                 runCatching { drain() }
                     .onFailure { failure ->
@@ -100,6 +113,39 @@ internal class BlobWorker(
     }
 
     /**
+     * Puts back to work every upload an earlier version of this library gave up on.
+     *
+     * Uploads used to be given up on after a handful of attempts, which a minute without a network
+     * was enough to use up, and nothing ever tried them again: the record had long since been
+     * published naming the file, so every other device saw an attachment whose bytes would never
+     * arrive. A file given up on whose bytes are still here can only be one of those — a download
+     * that was given up on has no bytes — so it is sent again. One the server will not take for its
+     * size is left where it is, since sending it again would only be refused again.
+     */
+    private suspend fun resumeGivenUpUploads() {
+        val givenUp =
+            transactions.transaction {
+                stores.blobs.all(scope, collection).filter { it.state == BlobTransferState.UNAVAILABLE }
+            }
+        for (record in givenUp) {
+            val stat = blobStore.statOrNull(record.blobId) ?: continue
+            if (stat.size > limits.maxBlobBytes) {
+                continue
+            }
+            transactions.transaction {
+                stores.blobs.setState(scope, collection, record.blobId, BlobTransferState.LOCAL)
+            }
+            log.info(
+                SyncLogEvent.BLOB_RETRIED,
+                context = { mapOf("blob" to record.blobId.value.toString()) },
+            ) { "an upload that was given up on still has its bytes on this device; sending it again" }
+        }
+        if (givenUp.isNotEmpty()) {
+            requestTransfers()
+        }
+    }
+
+    /**
      * Sends and fetches until nothing is ready to move.
      *
      * Uploads go first and are drained before downloads are looked at. A record waiting on a file it
@@ -111,9 +157,31 @@ internal class BlobWorker(
         while (true) {
             val moved = uploadBatch() || downloadBatch()
             if (!moved) {
+                wakeWhenDue()
                 return
             }
         }
+    }
+
+    /**
+     * Sleeps until the next file serving a backoff becomes due, then looks again.
+     *
+     * Without it a retry happened whenever the next cycle ran, which on a device nobody touches is
+     * the periodic timer — a quarter of an hour — so the backoff said one thing and the worker did
+     * another: a bucket fixed a minute ago left a receipt unsent for fourteen more, and a file
+     * waiting for another device was looked for far less often than it was meant to be.
+     */
+    private suspend fun wakeWhenDue() {
+        val now = clock.now().toEpochMilliseconds()
+        val due = transactions.transaction { stores.blobs.nextRetryAt(scope, collection, now) }
+        wake?.cancel()
+        wake =
+            due?.let {
+                coroutineScope.launch {
+                    delay(due - now)
+                    requestTransfers()
+                }
+            }
     }
 
     /**
@@ -199,7 +267,7 @@ internal class BlobWorker(
                 )
             transactions.transaction {
                 stores.blobs.setDeclaration(scope, collection, record.blobId, stat)
-                stores.blobs.setState(scope, collection, record.blobId, BlobTransferState.UPLOADING)
+                enter(record, BlobTransferState.UPLOADING)
             }
             // The server has heard of the file now, which is all a deferred record was waiting for.
             // Its bytes may still take minutes, and the record should not wait them out.
@@ -226,8 +294,24 @@ internal class BlobWorker(
                 log,
             )
             onProgressed()
-        } catch (failure: SyncTransportFailure) {
+        } catch (failure: SyncTransportFailure.BlobRefused) {
+            // The server refuses the file itself — its identifier names other bytes, or it is over
+            // the ceiling. Sending the same bytes again cannot change that answer.
             retryOrGiveUp(record, failure)
+        } catch (failure: SyncTransportFailure) {
+            // Never given up on while the bytes are here. The record naming this file has been on
+            // every other device since registration, and those devices can do nothing but wait for
+            // it; a network that is gone for a minute, or a bucket that is misconfigured for a day,
+            // is something to outlast rather than a reason to abandon the owner's receipt.
+            schedule(record, failure.message ?: "the transfer did not complete")
+            if (record.attempts + 1 == maxAttempts) {
+                log.warn(
+                    SyncLogEvent.BLOB_UPLOAD_STUCK,
+                    context = {
+                        mapOf("blob" to record.blobId.value.toString(), "attempts" to maxAttempts.toString())
+                    },
+                ) { "this file keeps failing to upload and is still being tried: ${failure.message}" }
+            }
         }
     }
 
@@ -250,14 +334,14 @@ internal class BlobWorker(
                     SyncLogEvent.BLOB_NOT_READY,
                     context = { mapOf("blob" to record.blobId.value.toString()) },
                 ) { "the file is registered and still arriving at the server; this device waits for it" }
-                schedule(record, "the server does not have the bytes yet")
+                wait(record, "the server does not have the bytes yet")
                 return
             }
 
             val stat = BlobStat(answer.blob.size, answer.blob.contentType, answer.blob.checksum)
             transactions.transaction {
                 stores.blobs.setDeclaration(scope, collection, record.blobId, stat)
-                stores.blobs.setState(scope, collection, record.blobId, BlobTransferState.DOWNLOADING)
+                enter(record, BlobTransferState.DOWNLOADING)
             }
             val written =
                 reportingProgress(record.blobId) { onProgress ->
@@ -289,6 +373,28 @@ internal class BlobWorker(
             giveUp(record.blobId, BlobFailure.Gone(failure.message.orEmpty()))
         } catch (failure: SyncTransportFailure) {
             retryOrGiveUp(record, failure)
+        }
+    }
+
+    /**
+     * Moves a file into the state its transfer runs in, unless a previous attempt already did.
+     *
+     * Moving to a state forgets the attempts, which is right the first time and wrong every time
+     * after: a transfer that failed while already in this state would start each retry from zero,
+     * so its backoff never grew — a refused upload was sent again every second or two for as long
+     * as the refusal lasted — and a download never reached the attempt it is given up on at.
+     *
+     * Runs inside the caller's transaction.
+     *
+     * @param record File as it was read for this attempt.
+     * @param state State the transfer runs in.
+     */
+    private suspend fun enter(
+        record: BlobRecord,
+        state: BlobTransferState,
+    ) {
+        if (record.state != state) {
+            stores.blobs.setState(scope, collection, record.blobId, state)
         }
     }
 
@@ -381,6 +487,31 @@ internal class BlobWorker(
     }
 
     /**
+     * Looks again later for a file another device has not finished sending, without counting it.
+     *
+     * Not an attempt: nothing failed here, and spending attempts on it gave a receipt up a minute
+     * after it was attached. The delay is fixed rather than growing because nothing is being backed
+     * off from, and the scope's channel wakes the worker sooner when the file becomes usable.
+     *
+     * @param record File that is not on the server yet.
+     * @param reason What to show for it meanwhile.
+     */
+    private suspend fun wait(
+        record: BlobRecord,
+        reason: String,
+    ) {
+        transactions.transaction {
+            stores.blobs.recordWait(
+                scope = scope,
+                collection = collection,
+                blobId = record.blobId,
+                error = reason,
+                nextRetryAt = (clock.now() + NOT_READY_DELAY).toEpochMilliseconds(),
+            )
+        }
+    }
+
+    /**
      * Stops trying and tells the application, which is the only party that can do anything about it.
      *
      * The reference is left exactly as it is. Dropping it would be the library editing the
@@ -429,7 +560,13 @@ internal class BlobWorker(
         /** Transfers running at once. Two keeps a connection busy without monopolising a phone's. */
         const val CONCURRENCY = 2
 
-        /** Attempts before a file is given up on and the application is told. */
+        /**
+         * Attempts before a download is given up on and the application is told. An upload is never
+         * given up on for a failed transfer; reaching this many is only reported.
+         */
         const val DEFAULT_MAX_ATTEMPTS = 5
+
+        /** How long to wait before asking again for a file another device is still sending. */
+        val NOT_READY_DELAY = 1.minutes
     }
 }

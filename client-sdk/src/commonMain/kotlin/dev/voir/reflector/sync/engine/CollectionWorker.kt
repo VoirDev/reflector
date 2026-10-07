@@ -500,6 +500,18 @@ internal class CollectionWorker(
     }
 
     /**
+     * Puts a file back to work now and wakes the worker for it.
+     *
+     * @param blobId File to try again.
+     */
+    suspend fun retryBlob(blobId: BlobId) {
+        val reconciler = reconciler ?: return
+        if (reconciler.retry(blobId)) {
+            blobWorker?.requestTransfers()
+        }
+    }
+
+    /**
      * Compares the shape the adapter declares with the one this collection was synchronised under.
      *
      * Runs first in the cycle, before anything reads or writes the application's tables: everything

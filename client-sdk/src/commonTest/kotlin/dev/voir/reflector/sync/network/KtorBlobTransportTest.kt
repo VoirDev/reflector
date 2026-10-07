@@ -10,6 +10,7 @@ import dev.voir.reflector.sync.protocol.blob.BlobContentType
 import dev.voir.reflector.sync.protocol.blob.BlobDescriptor
 import dev.voir.reflector.sync.protocol.blob.BlobTicket
 import dev.voir.reflector.sync.protocol.blob.BlobTicketMethod
+import io.ktor.client.engine.mergeHeaders
 import io.ktor.client.engine.mock.MockEngine
 import io.ktor.client.engine.mock.MockRequestHandleScope
 import io.ktor.client.engine.mock.respond
@@ -20,6 +21,7 @@ import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpMethod
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.headersOf
+import io.ktor.utils.io.InternalAPI
 import io.ktor.utils.io.ByteReadChannel
 import kotlinx.coroutines.test.runTest
 import kotlinx.io.Buffer
@@ -92,6 +94,37 @@ class KtorBlobTransportTest {
             assertNull(request.headers[HttpHeaders.Authorization])
         }
 
+    /**
+     * The AWS SDK names signed headers in lower case. Every engine writes `Content-Type` from the
+     * body and skipped the request's copy only when spelled exactly like that, so the header went
+     * out twice and S3 refused every upload with `SignatureDoesNotMatch`.
+     */
+    @OptIn(InternalAPI::class)
+    @Test
+    fun `a signed header spelled in lower case is sent once`() =
+        runTest {
+            val transport = transport { respond("", HttpStatusCode.OK) }
+
+            transport.upload(
+                ticket(BlobTicketMethod.PUT).copy(headers = mapOf("content-type" to "image/jpeg")),
+                Buffer().apply { write(BYTES) },
+                stat(),
+            )
+
+            val request = requests.single()
+            // What an engine actually writes, rather than the builder's case-insensitive view of it.
+            val sent = mutableListOf<Pair<String, String>>()
+            mergeHeaders(request.headers, request.body) { name, value -> sent += name to value }
+            assertEquals(
+                listOf("image/jpeg"),
+                sent.filter { it.first.equals(HttpHeaders.ContentType, ignoreCase = true) }.map { it.second },
+            )
+            assertEquals(
+                listOf(BYTES.size.toString()),
+                sent.filter { it.first.equals(HttpHeaders.ContentLength, ignoreCase = true) }.map { it.second },
+            )
+        }
+
     @Test
     fun `a request to the synchronisation server does carry them`() =
         runTest {
@@ -157,7 +190,40 @@ class KtorBlobTransportTest {
             }
         }
 
-    private fun stat() = BlobStat(size = BYTES.size.toLong(), contentType = BlobContentType("image/jpeg"))
+    @Test
+    fun `a storage refusal names the storage's status and error code, never the scope`() =
+        runTest {
+            val transport =
+                transport {
+                    respond(
+                        "<Error><Code>SignatureDoesNotMatch</Code><StringToSign>AWS4 user-1/ledger</StringToSign></Error>",
+                        HttpStatusCode.Forbidden,
+                    )
+                }
+
+            // A bucket's 403 is a refused signature or a missing permission on the host's side. Read
+            // with the synchronisation server's meaning it said the scope was revoked, which sent
+            // the diagnosis of a misconfigured bucket in the wrong direction.
+            val failure =
+                assertFailsWith<SyncTransportFailure.ServerError> {
+                    transport.upload(ticket(BlobTicketMethod.PUT), Buffer().apply { write(BYTES) }, stat())
+                }
+
+            assertEquals(403, failure.statusCode)
+            assertEquals("the storage refused the upload: 403 SignatureDoesNotMatch", failure.message)
+        }
+
+    @Test
+    fun `a download the storage has no object for is a gone file`() =
+        runTest {
+            val transport = transport { respond("<Error><Code>NoSuchKey</Code></Error>", HttpStatusCode.NotFound) }
+
+            assertFailsWith<SyncTransportFailure.BlobGone> {
+                transport.download(ticket(BlobTicketMethod.GET), Buffer())
+            }
+        }
+
+    private fun stat() =BlobStat(size = BYTES.size.toLong(), contentType = BlobContentType("image/jpeg"))
 
     private companion object {
         val BYTES = byteArrayOf(1, 2, 3, 4)

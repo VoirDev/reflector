@@ -148,6 +148,53 @@ internal class BlobReconciler(
     }
 
     /**
+     * Puts a file back to work now, whichever way it was moving.
+     *
+     * A file given up on goes back to where its direction starts, with no attempts and no error: an
+     * upload when the application still holds the bytes, a download otherwise, wanted either way —
+     * somebody asked. A file still moving keeps its state and loses its attempts and its backoff, so
+     * the worker takes it on its next pass with a first attempt's short delays. A file already where
+     * it belongs, or one the library does not track, is left alone.
+     *
+     * @param blobId File to try again.
+     * @return Whether anything was put back to work, so the caller knows to wake the worker.
+     */
+    suspend fun retry(blobId: BlobId): Boolean {
+        // Outside the transaction, as everywhere else this asks the application about its own store.
+        val stat = runCatching { blobStore.stat(blobId) }.getOrNull()
+        val retried =
+            transactions.transaction {
+                val record = stores.blobs.find(scope, collection, blobId)
+                when (record?.state) {
+                    BlobTransferState.UNAVAILABLE -> {
+                        val restart = if (stat != null) BlobTransferState.LOCAL else BlobTransferState.REMOTE
+                        stores.blobs.setState(scope, collection, blobId, restart)
+                        stores.blobs.setWanted(scope, collection, blobId, wanted = true)
+                        true
+                    }
+
+                    BlobTransferState.LOCAL,
+                    BlobTransferState.UPLOADING,
+                    BlobTransferState.REMOTE,
+                    BlobTransferState.DOWNLOADING,
+                    -> {
+                        stores.blobs.resetAttempts(scope, collection, blobId)
+                        true
+                    }
+
+                    BlobTransferState.UPLOADED, BlobTransferState.READY, null -> false
+                }
+            }
+        if (retried) {
+            log.debug(
+                SyncLogEvent.BLOB_RETRIED,
+                context = { mapOf("blob" to blobId.value.toString()) },
+            ) { "the application asked for a file to be tried again" }
+        }
+        return retried
+    }
+
+    /**
      * Records that the application wants a file's bytes on this device.
      *
      * What [dev.voir.reflector.sync.core.blob.BlobFetch.ON_DEMAND] is waiting for. It writes the

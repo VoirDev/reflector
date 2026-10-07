@@ -110,6 +110,51 @@ public interface SyncBlobDao {
     )
 
     /**
+     * Records that the bytes are not there yet and when to look again, without counting it.
+     *
+     * A file the server holds as still arriving is waiting on another device, not failing on this
+     * one. Counting those looks as attempts let a device give up on a receipt a minute after it was
+     * attached, while its owner's other phone was still on the way to a network.
+     *
+     * @param scopeId Scope of the file.
+     * @param collectionId Collection of the file.
+     * @param blobId Identifier of the file.
+     * @param error Why the file could not be moved yet.
+     * @param nextRetryAt When to look again.
+     */
+    @Query(
+        "UPDATE sync_blob SET last_error = :error, next_retry_at = :nextRetryAt, transferred = 0 " +
+            "WHERE scope_id = :scopeId AND collection_id = :collectionId AND blob_id = :blobId",
+    )
+    public suspend fun recordWait(
+        scopeId: String,
+        collectionId: String,
+        blobId: Uuid,
+        error: String,
+        nextRetryAt: Long,
+    )
+
+    /**
+     * Forgets the attempts a file has used and any backoff it is serving, keeping its state.
+     *
+     * What a user asking to try again means for a transfer that has not been given up on: start now,
+     * and with the short delays a first attempt gets.
+     *
+     * @param scopeId Scope of the file.
+     * @param collectionId Collection of the file.
+     * @param blobId Identifier of the file.
+     */
+    @Query(
+        "UPDATE sync_blob SET attempts = 0, next_retry_at = NULL, last_error = NULL " +
+            "WHERE scope_id = :scopeId AND collection_id = :collectionId AND blob_id = :blobId",
+    )
+    public suspend fun resetAttempts(
+        scopeId: String,
+        collectionId: String,
+        blobId: Uuid,
+    )
+
+    /**
      * Records whether this device is trying to hold a file's bytes.
      *
      * Deliberately touches nothing else. A request has to be able to reach a row that is mid-backoff
@@ -232,6 +277,31 @@ public interface SyncBlobDao {
     ): List<SyncBlobEntity>
 
     /**
+     * Finds when the next file serving a backoff becomes due.
+     *
+     * The same files [waiting] would return, minus the condition that they are due already: what
+     * the worker sleeps until when nothing can move now, so a retry happens when its backoff says
+     * rather than whenever the next cycle happens to run.
+     *
+     * @param scopeId Scope to read.
+     * @param collectionId Collection to read.
+     * @param now Current moment; only later retries are considered.
+     * @return The earliest moment one becomes due, or `null` when none is waiting on a backoff.
+     */
+    @Query(
+        "SELECT MIN(b.next_retry_at) FROM sync_blob b WHERE b.scope_id = :scopeId " +
+            "AND b.collection_id = :collectionId AND b.wanted = 1 AND b.next_retry_at > :now " +
+            "AND b.state IN ('LOCAL', 'UPLOADING', 'REMOTE', 'DOWNLOADING') " +
+            "AND EXISTS (SELECT 1 FROM sync_blob_ref r WHERE r.scope_id = b.scope_id " +
+            "AND r.collection_id = b.collection_id AND r.blob_id = b.blob_id)",
+    )
+    public suspend fun nextRetryAt(
+        scopeId: String,
+        collectionId: String,
+        now: Long,
+    ): Long?
+
+    /**
      * Counts files in a given state that this device wants and some document still points at.
      *
      * The same two conditions as [waiting], for the same reason: what is counted here is published
@@ -252,6 +322,26 @@ public interface SyncBlobDao {
         collectionId: String,
         state: BlobTransferState,
     ): Flow<Int>
+
+    /**
+     * Publishes every file of a collection that some document still points at.
+     *
+     * What a screen listing a collection's files binds to. A file nothing references is on its way
+     * out and is not the owner's any more, so it is left out.
+     *
+     * @param scopeId Scope to read.
+     * @param collectionId Collection to read.
+     * @return Referenced files, in the order the library learned of them.
+     */
+    @Query(
+        "SELECT b.* FROM sync_blob b WHERE b.scope_id = :scopeId AND b.collection_id = :collectionId " +
+            "AND EXISTS (SELECT 1 FROM sync_blob_ref r WHERE r.scope_id = b.scope_id " +
+            "AND r.collection_id = b.collection_id AND r.blob_id = b.blob_id) ORDER BY b.rowid",
+    )
+    public fun observeReferenced(
+        scopeId: String,
+        collectionId: String,
+    ): Flow<List<SyncBlobEntity>>
 
     /**
      * Reads every file of a collection that no document points at any more.

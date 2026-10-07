@@ -308,7 +308,15 @@ class SyncEngineTest {
                 markUpserted(wallet, walletId)
             }
             transport.onPush = { throw SyncTransportFailure.CollectionReset("purged") }
-            transport.onChanges = { throw SyncTransportFailure.CollectionReset("purged") }
+            // Only a device still reading the purged collection is told so; one that has rebuilt reads
+            // the new one like any other. A server that kept refusing would reset it on every cycle,
+            // and the test would read the store halfway through the next rebuild.
+            transport.onChanges = { cursor ->
+                if (cursor?.value?.startsWith(NEW_EPOCH_VALUE) != true) {
+                    throw SyncTransportFailure.CollectionReset("purged")
+                }
+                ChangesPage(emptyList(), null, hasMore = false, epoch = CollectionEpoch(NEW_EPOCH_VALUE))
+            }
             transport.onSnapshot = {
                 snapshots++
                 SnapshotPage(
@@ -321,7 +329,15 @@ class SyncEngineTest {
             }
             collection.requestSync()
 
-            awaitRecord("the collection being discarded") { it.event == SyncLogEvent.COLLECTION_RESET }
+            // The published state follows the database asynchronously, so right after the reset it
+            // can still read live with nothing queued from before it — the edit may even have reached
+            // the old collection before it was purged. Only a bootstrap finished after the reset says
+            // the new incarnation is in place.
+            awaitRecords("the collection being discarded and rebuilt") {
+                val events = logs.records.value.map { it.event }
+                val reset = events.indexOf(SyncLogEvent.COLLECTION_RESET)
+                reset >= 0 && events.subList(reset, events.size).contains(SyncLogEvent.BOOTSTRAP_FINISHED)
+            }
             collection.state.await("a live collection rebuilt from the new incarnation") {
                 it.phase == SyncPhase.LIVE && it.pendingCount == 0
             }

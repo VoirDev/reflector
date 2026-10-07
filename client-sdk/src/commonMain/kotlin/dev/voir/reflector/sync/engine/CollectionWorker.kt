@@ -4,6 +4,7 @@ import dev.voir.reflector.sync.core.ScopeState
 import dev.voir.reflector.sync.core.SyncFailure
 import dev.voir.reflector.sync.core.SyncPhase
 import dev.voir.reflector.sync.core.adapter.CollectionAdapter
+import dev.voir.reflector.sync.core.adapter.RemoteOp
 import dev.voir.reflector.sync.core.adapter.SchemaFingerprint
 import dev.voir.reflector.sync.core.blob.BlobFetch
 import dev.voir.reflector.sync.core.blob.BlobStore
@@ -32,15 +33,24 @@ import dev.voir.reflector.sync.engine.retry.BackoffPolicy
 import dev.voir.reflector.sync.persistence.SyncStores
 import dev.voir.reflector.sync.persistence.SyncTransactionRunner
 import dev.voir.reflector.sync.persistence.group.PushGroupState
+import dev.voir.reflector.sync.persistence.record.MutationIntent
 import dev.voir.reflector.sync.protocol.BlobId
 import dev.voir.reflector.sync.protocol.ClientId
 import dev.voir.reflector.sync.protocol.CollectionId
 import dev.voir.reflector.sync.protocol.ScopeId
 import dev.voir.reflector.sync.protocol.config.SyncLimits
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlin.concurrent.Volatile
+import kotlin.coroutines.AbstractCoroutineContextElement
+import kotlin.coroutines.CoroutineContext
+import kotlin.coroutines.cancellation.CancellationException
 import kotlin.time.Clock
 import kotlin.time.Instant
 import kotlin.uuid.Uuid
@@ -104,13 +114,17 @@ internal class CollectionWorker(
     private val requests = Channel<Unit>(Channel.CONFLATED)
 
     /**
-     * Whether the application asked for this device's unsent changes to be discarded.
+     * Held by a cycle for as long as it runs, and by a discard while it rewrites the collection.
      *
-     * A flag rather than a request of its own, so that it is carried out by the cycle in its proper
-     * place — after the limits are known and before anything is pushed — rather than racing a cycle
-     * already running. A state flow only for its atomic compare-and-set.
+     * A discard cannot share the collection with a cycle: a pull applied over a record the discard
+     * has just cleaned, or a bootstrap that ends by declaring the collection live after the discard
+     * asked for it to be rebuilt, would each leave rows showing a change nothing will ever overwrite.
      */
-    private val discardRequested = MutableStateFlow(false)
+    private val cycleLock = Mutex()
+
+    /** The cycle running now, or `null` between cycles; what a discard cancels instead of waiting for. */
+    @Volatile
+    private var runningCycle: Job? = null
     private val declined = mutableSetOf<ConflictId>()
     private val references = blobStore?.let { BlobReferences(scope, collection, stores, adapter, blobFetch) }
     private val reconciler =
@@ -145,18 +159,15 @@ internal class CollectionWorker(
     fun start() {
         coroutineScope.launch {
             for (request in requests) {
-                runCatching { cycle() }
-                    .onFailure { failure ->
-                        // The only place the stack trace of a fault inside the application's adapter
-                        // or its database is ever visible: what reaches the application through
-                        // `lastFailure` is a description, and a description of a `NullPointerException`
-                        // is of no use to anybody.
-                        log.error(SyncLogEvent.CYCLE_FAILED, failure) {
-                            "the cycle threw; the transaction was rolled back and the collection is unchanged"
-                        }
-                        lastFailure.value =
-                            SyncFailure.Local(failure.message ?: "the application's code threw", failure)
-                    }
+                cycleLock.withLock {
+                    // A child of its own, so that a discard can cancel the cycle without stopping
+                    // the loop: everything a cycle writes is written in transactions, so one cut
+                    // short leaves exactly what a process that died at the same point would.
+                    val cycle = launch(CycleMarker()) { runCycle() }
+                    runningCycle = cycle
+                    cycle.join()
+                    runningCycle = null
+                }
                 // Outside the cycle rather than at the end of it, and deliberately: what this decides
                 // is derived from the reference rows, not from what the cycle managed to achieve, and
                 // a cycle stops early for half a dozen ordinary reasons. A push that was refused is
@@ -182,12 +193,42 @@ internal class CollectionWorker(
     }
 
     /**
-     * Asks the worker to throw away every unsent change and rebuild the collection, at the start of
-     * its next cycle.
+     * Throws away every unsent change now, and asks for the collection to be rebuilt.
+     *
+     * A cycle running at the time is cancelled rather than waited for: what it is pushing is what is
+     * being thrown away, and what it is downloading the rebuild downloads again. Returns once the
+     * discard has committed; the rebuild follows in the next cycle.
+     *
+     * @throws IllegalStateException When called from inside the cycle — from the adapter's callbacks
+     *   — which would wait for the very cycle it runs in.
      */
-    fun requestDiscard() {
-        discardRequested.value = true
+    suspend fun discardLocalChanges() {
+        check(currentCoroutineContext()[CycleMarker] == null) {
+            "discardLocalChanges() cannot be called from inside the adapter's callbacks"
+        }
+        runningCycle?.cancel()
+        cycleLock.withLock { discard() }
         requestSync()
+    }
+
+    /**
+     * Runs one cycle, turning a fault in it into a reported failure rather than the end of the loop.
+     */
+    private suspend fun runCycle() {
+        try {
+            cycle()
+        } catch (cancelled: CancellationException) {
+            // A discard cut the cycle short, or the worker is stopping. Neither is a failure.
+            throw cancelled
+        } catch (failure: Throwable) {
+            // The only place the stack trace of a fault inside the application's adapter or its
+            // database is ever visible: what reaches the application through `lastFailure` is a
+            // description, and a description of a `NullPointerException` is of no use to anybody.
+            log.error(SyncLogEvent.CYCLE_FAILED, failure) {
+                "the cycle threw; the transaction was rolled back and the collection is unchanged"
+            }
+            lastFailure.value = SyncFailure.Local(failure.message ?: "the application's code threw", failure)
+        }
     }
 
     private suspend fun cycle() {
@@ -248,11 +289,6 @@ internal class CollectionWorker(
 
         startBlobWorker(limits)
         reconcileSchema()
-        // Before the queue is drained, which is the whole point: the head the server keeps refusing
-        // is exactly what must not be tried again.
-        if (discardRequested.compareAndSet(expect = true, update = false)) {
-            return discardAndRebuild(bootstrap)
-        }
         if (needsBootstrap() && !bootstrap(bootstrap)) {
             return
         }
@@ -659,39 +695,53 @@ internal class CollectionWorker(
     }
 
     /**
-     * Throws away this device's unsent work because the application asked, and rebuilds.
+     * Throws away this device's unsent work because the application asked.
      *
      * The same discarding [resetToServer] does, without the parts that belong to a collection the
      * server replaced: the incarnation is still the one this device follows, so it is kept, and the
-     * files the snapshot still names are kept rather than downloaded again. What the dropped
-     * documents alone pointed at is released by the reconciliation that follows every cycle.
+     * files the snapshot still names are kept rather than downloaded again.
      *
-     * @param coordinator Bootstrap to rebuild the collection with once its local changes are gone.
+     * What can be undone without the server is undone here, in the same transaction: an entity the
+     * server has never confirmed is one it does not have, so its row is deleted now rather than left
+     * on screen until a snapshot happens to arrive — which, on a device without a connection, could
+     * be days. An entity the server does have needs the server's copy, so its row is left to the
+     * rebuild, and the phase written beside the discard says so until it is done.
      */
-    private suspend fun discardAndRebuild(coordinator: BootstrapCoordinator) {
-        val abandoned =
+    private suspend fun discard() {
+        val outcome =
             transactions.transaction {
                 val pending = stores.records.pendingCount(scope, collection)
+                val unconfirmed = stores.records.unconfirmed(scope, collection)
+                // A creation deleted again before it was sent has no row left to delete.
+                val created = unconfirmed.filter { it.intent == MutationIntent.UPSERT }
+                if (created.isNotEmpty()) {
+                    adapter.applyRemote(created.map { RemoteOp.Delete(it.entityType, it.entityId) })
+                }
+                unconfirmed.forEach { references?.clear(it.entityType, it.entityId) }
+                stores.records.deleteUnconfirmed(scope, collection)
                 stores.groups.deleteCollection(scope, collection)
                 stores.conflicts.deleteCollection(scope, collection)
                 stores.inbox.clear(scope, collection)
-                stores.records.discardLocalChanges(scope, collection)
+                stores.records.abandonLocalChanges(scope, collection)
                 // Written in the same transaction: a process that dies after this has a collection
                 // that still knows it must be rebuilt, rather than one that has forgotten its
                 // changes and kept rows nothing will ever overwrite.
                 stores.collections.setPhase(scope, collection, SyncPhase.RESYNC_REQUIRED)
-                pending
+                pending to created.size
             }
+        val (abandoned, removed) = outcome
         declined.clear()
         lastFailure.value = null
         log.warn(
             SyncLogEvent.LOCAL_CHANGES_DISCARDED,
-            context = { mapOf("abandoned" to abandoned.toString()) },
-        ) { "the application asked for $abandoned unsent change(s) to be discarded" }
+            context = { mapOf("abandoned" to abandoned.toString(), "removed" to removed.toString()) },
+        ) {
+            "the application asked for $abandoned unsent change(s) to be discarded; $removed entity(ies) " +
+                "the server never had were deleted at once"
+        }
         log.info(SyncLogEvent.RESYNC_REQUIRED, context = { mapOf("reason" to "discarded") }) {
             "the collection will be rebuilt from a snapshot because its local changes were discarded"
         }
-        bootstrap(coordinator)
     }
 
     /**
@@ -891,6 +941,17 @@ internal class CollectionWorker(
         val outgoingFiles: Int = 0,
         val incomingFiles: Int = 0,
     )
+
+    /**
+     * Marks the coroutine a cycle runs in, and everything the adapter is called from inside it.
+     *
+     * Read by [discardLocalChanges], which waits for the running cycle to stop: called from inside
+     * that cycle it would cancel itself instead, and do nothing anybody could see.
+     */
+    private class CycleMarker : AbstractCoroutineContextElement(CycleMarker) {
+        /** Key the marker is looked up by. */
+        companion object Key : CoroutineContext.Key<CycleMarker>
+    }
 
     private companion object {
         const val TOO_MANY_REQUESTS = 429

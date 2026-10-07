@@ -143,7 +143,7 @@ internal class DefaultCollectionHandle(
     }
 
     override suspend fun discardLocalChanges() {
-        worker.requestDiscard()
+        worker.discardLocalChanges()
     }
 
     override suspend fun resolve(

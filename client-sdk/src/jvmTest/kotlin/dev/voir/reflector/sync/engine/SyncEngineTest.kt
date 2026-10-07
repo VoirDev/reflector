@@ -41,9 +41,11 @@ import dev.voir.reflector.sync.protocol.events.SyncEvent
 import dev.voir.reflector.sync.protocol.push.AppliedVersion
 import dev.voir.reflector.sync.protocol.push.ConflictEntry
 import dev.voir.reflector.sync.protocol.push.PushGroupResult
+import dev.voir.reflector.sync.protocol.push.PushRequest
 import dev.voir.reflector.sync.protocol.push.PushResponse
 import dev.voir.reflector.sync.protocol.push.RejectCode
 import dev.voir.reflector.sync.protocol.push.RejectError
+import dev.voir.reflector.sync.protocol.snapshot.SnapshotItem
 import dev.voir.reflector.sync.protocol.snapshot.SnapshotPage
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -166,6 +168,40 @@ class SyncEngineTest {
     private fun emptySnapshot(): SnapshotPage {
         snapshots++
         return SnapshotPage(testCursor("0"), emptyList(), nextPage = null, hasMore = false, epoch = TEST_EPOCH)
+    }
+
+    /**
+     * A snapshot holding the one wallet the server has, as it has it.
+     *
+     * @param title Title the server holds for the wallet.
+     */
+    private fun walletSnapshot(title: String): SnapshotPage {
+        snapshots++
+        val item = SnapshotItem(wallet, walletId, EntityVersion("1"), buildJsonObject { put("title", title) })
+        return SnapshotPage(testCursor("1"), listOf(item), nextPage = null, hasMore = false, epoch = TEST_EPOCH)
+    }
+
+    /** A server that applies every group it is sent. */
+    private fun applyingEverything(request: PushRequest): PushResponse {
+        val group = request.groups.single()
+        return PushResponse(
+            results =
+                listOf(
+                    PushGroupResult.Applied(
+                        groupId = group.groupId,
+                        versions = group.ops.map { AppliedVersion(it.entity, it.id, EntityVersion("42")) },
+                    ),
+                ),
+            latestSeq = BatchSeq("42"),
+            epoch = TEST_EPOCH,
+        )
+    }
+
+    /** Makes every request to the server fail as though it could not be reached. */
+    private fun goOffline() {
+        transport.onPush = { throw SyncTransportFailure.Unreachable("offline") }
+        transport.onChanges = { throw SyncTransportFailure.Unreachable("offline") }
+        transport.onSnapshot = { throw SyncTransportFailure.Unreachable("offline") }
     }
 
     private fun engine(
@@ -420,6 +456,116 @@ class SyncEngineTest {
                 adapter.bodies[wallet to walletId],
                 "a row the server never accepted goes with the change that created it",
             )
+        }
+
+    @Test
+    fun `discarding without a connection removes what the server never had at once`() =
+        runBlocking<Unit> {
+            transport.onSnapshot = { emptySnapshot() }
+            val collection = engine(workers).scope(scopeId).collection(ledger)
+            collection.state.await("a live collection") { it.phase == SyncPhase.LIVE }
+            goOffline()
+            collection.mutate {
+                adapter.bodies[wallet to walletId] = buildJsonObject { put("title", "Cash") }
+                markUpserted(wallet, walletId)
+            }
+            awaitRecord("the push that could not leave") { it.event == SyncLogEvent.RETRY_SCHEDULED }
+
+            collection.discardLocalChanges()
+
+            // All of it before the call returned, and none of it needing the server.
+            assertNull(adapter.bodies[wallet to walletId], "a row the server never had is deleted at once")
+            val diagnostics = collection.diagnostics()
+            assertTrue(diagnostics.queue.isEmpty(), "the queue is empty")
+            assertEquals(0, diagnostics.pendingCount, "nothing is waiting to be sent")
+            assertEquals(SyncPhase.RESYNC_REQUIRED, diagnostics.phase, "the rebuild is still owed")
+            assertNull(stores.records.find(scopeId, ledger, wallet, walletId), "the record went with the row")
+
+            val pushesBefore = transport.pushes.size
+            transport.onChanges = { ChangesPage(emptyList(), null, hasMore = false, epoch = TEST_EPOCH) }
+            transport.onSnapshot = { emptySnapshot() }
+            collection.requestSync()
+            collection.state.await("the rebuilt collection") { it.phase == SyncPhase.LIVE }
+            assertEquals(pushesBefore, transport.pushes.size, "the discarded change is never sent")
+        }
+
+    @Test
+    fun `an edit the server has is undone by the rebuild and a later change is kept`() =
+        runBlocking<Unit> {
+            val otherId = EntityId(Uuid.parse("00000000-0000-7000-8000-100000000002"))
+            transport.onSnapshot = { walletSnapshot("Cash") }
+            val collection = engine(workers).scope(scopeId).collection(ledger)
+            collection.state.await("a live collection") { it.phase == SyncPhase.LIVE }
+            goOffline()
+            collection.mutate {
+                adapter.bodies[wallet to walletId] = buildJsonObject { put("title", "Discarded") }
+                markUpserted(wallet, walletId)
+            }
+            awaitRecord("the push that could not leave") { it.event == SyncLogEvent.RETRY_SCHEDULED }
+
+            collection.discardLocalChanges()
+            // The attempts that could not leave are recorded too; only what follows the discard counts.
+            val attempted = transport.pushes.size
+            // Made after the discard returned, so it is a change of its own and not part of it.
+            collection.mutate {
+                adapter.bodies[wallet to otherId] = buildJsonObject { put("title", "Savings") }
+                markUpserted(wallet, otherId)
+            }
+            assertEquals(
+                buildJsonObject { put("title", "Discarded") },
+                adapter.bodies[wallet to walletId],
+                "the server's copy is needed to undo an edit, so the row waits for the rebuild",
+            )
+
+            transport.onChanges = { ChangesPage(emptyList(), null, hasMore = false, epoch = TEST_EPOCH) }
+            transport.onSnapshot = { walletSnapshot("Cash") }
+            transport.onPush = { request -> applyingEverything(request) }
+            collection.requestSync()
+            collection.state.await("the rebuilt collection with its queue drained") {
+                it.phase == SyncPhase.LIVE && it.pendingCount == 0
+            }
+
+            assertEquals(buildJsonObject { put("title", "Cash") }, adapter.bodies[wallet to walletId])
+            val sent = transport.pushes.drop(attempted).flatMap { push -> push.groups.flatMap { it.ops } }.map { it.id }
+            assertEquals(listOf(otherId), sent, "only the change made after the discard is sent")
+        }
+
+    @Test
+    fun `an edit made on top of a discarded change before the rebuild is a conflict`() =
+        runBlocking<Unit> {
+            transport.onSnapshot = { walletSnapshot("Cash") }
+            val collection = engine(workers).scope(scopeId).collection(ledger)
+            collection.state.await("a live collection") { it.phase == SyncPhase.LIVE }
+            goOffline()
+            collection.mutate {
+                adapter.bodies[wallet to walletId] = buildJsonObject { put("title", "Discarded") }
+                markUpserted(wallet, walletId)
+            }
+            awaitRecord("the push that could not leave") { it.event == SyncLogEvent.RETRY_SCHEDULED }
+
+            collection.discardLocalChanges()
+            val attempted = transport.pushes.size
+            // The row still shows the discarded title, and this edit is made on top of it.
+            collection.mutate {
+                adapter.bodies[wallet to walletId] = buildJsonObject { put("title", "Discarded, then edited") }
+                markUpserted(wallet, walletId)
+            }
+
+            transport.onChanges = { ChangesPage(emptyList(), null, hasMore = false, epoch = TEST_EPOCH) }
+            transport.onSnapshot = { walletSnapshot("Cash") }
+            collection.requestSync()
+            collection.state.await("a conflict about the edit") { it.conflictCount == 1 }
+
+            val conflict = collection.conflicts.first().single()
+            assertEquals(walletId, conflict.entityId)
+            // It may still be sent — a snapshot's conflict does not hold the queue — but never as an
+            // update of the server's copy, which the server would apply over the user's back.
+            val sent =
+                transport.pushes
+                    .drop(attempted)
+                    .flatMap { push -> push.groups.flatMap { it.ops } }
+                    .filter { it.id == walletId }
+            assertTrue(sent.all { it.baseVersion == null }, "the edit claims no server state as its base")
         }
 
     @Test

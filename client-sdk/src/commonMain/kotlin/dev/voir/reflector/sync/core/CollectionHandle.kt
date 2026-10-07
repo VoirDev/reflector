@@ -153,14 +153,24 @@ public interface CollectionHandle {
      * device holds is worth less than a working queue, which is why the library never does this on
      * its own — except for a purged collection, where there is nothing left to keep the changes for.
      *
-     * The queue, the open conflicts and the pending edits are discarded and the collection is sent
-     * back to a snapshot, whose sweep removes whatever the server does not have and overwrites what
-     * it does. Files that only this device held go with the documents that pointed at them.
+     * The discard happens before this returns, in one transaction, with or without a connection: the
+     * queue, the open conflicts and the pending edits are gone, [CollectionSyncState.pendingCount]
+     * drops to zero, and entities created on this device that the server never confirmed are deleted
+     * through the adapter at once. A cycle running at the time is cancelled rather than waited for.
+     * Changes made after this returns are new changes and are kept.
      *
-     * The request is carried out at the start of the worker's next cycle rather than here, because
-     * the worker owns the order of things and discarding its queue from under a push in flight would
-     * race with it. It is held in memory until then: a process that dies first has discarded
-     * nothing, and the request has to be made again.
+     * What the server does have — an entity edited or deleted here — needs the server's copy, so
+     * those rows still show the discarded change until the snapshot that follows overwrites or
+     * restores them. Until then [CollectionSyncState.phase] stays [SyncPhase.RESYNC_REQUIRED] or
+     * [SyncPhase.BOOTSTRAPPING]; the discard is complete when it is [SyncPhase.LIVE] again. An edit
+     * made to such a row in the meantime is made on top of the discarded change, so it is not pushed
+     * as though it were based on the server's state: the snapshot opens a conflict for it instead.
+     * Files that only this device held go with the documents that pointed at them.
+     *
+     * Must not be called from inside the adapter's callbacks: it waits for the running cycle to stop,
+     * and they run inside that cycle.
+     *
+     * @throws IllegalStateException When called from inside one of the adapter's callbacks.
      */
     public suspend fun discardLocalChanges()
 

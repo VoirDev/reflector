@@ -394,6 +394,68 @@ public interface SyncRecordDao {
     )
 
     /**
+     * Returns the dirty records the server has never confirmed.
+     *
+     * What a discard can undo without asking the server: an entity with no confirmed version was
+     * created on this device and never acknowledged, so the server's state of it is "absent", and
+     * that is known without a snapshot. A creation whose acknowledgement was lost is among them too;
+     * the snapshot that follows brings it back, because then the server does have it.
+     *
+     * @param scopeId Scope of the collection.
+     * @param collectionId Identifier of the collection.
+     * @return Records whose entities exist only on this device.
+     */
+    @Query(
+        "SELECT * FROM sync_record WHERE scope_id = :scopeId AND collection_id = :collectionId " +
+            "AND local_rev > acked_rev AND server_version IS NULL",
+    )
+    public suspend fun unconfirmed(
+        scopeId: String,
+        collectionId: String,
+    ): List<SyncRecordEntity>
+
+    /**
+     * Removes the dirty records the server has never confirmed.
+     *
+     * Must run in the same transaction as the deletion of the corresponding application rows.
+     *
+     * @param scopeId Scope of the collection.
+     * @param collectionId Identifier of the collection.
+     */
+    @Query(
+        "DELETE FROM sync_record WHERE scope_id = :scopeId AND collection_id = :collectionId " +
+            "AND local_rev > acked_rev AND server_version IS NULL",
+    )
+    public suspend fun deleteUnconfirmed(
+        scopeId: String,
+        collectionId: String,
+    )
+
+    /**
+     * Drops every local change of a collection the server still holds, because the application
+     * asked to.
+     *
+     * Unlike [discardLocalChanges], the collection is the same one, so a clean record keeps the
+     * version it was confirmed at. Only a record that held a change loses it: its row still shows
+     * the discarded change until the snapshot overwrites it, and an edit made on top of that row in
+     * the meantime has to come back as a conflict rather than be pushed as if it were based on the
+     * server's state.
+     *
+     * @param scopeId Scope of the collection.
+     * @param collectionId Identifier of the collection.
+     */
+    @Query(
+        "UPDATE sync_record SET server_version = CASE WHEN local_rev > acked_rev THEN NULL " +
+            "ELSE server_version END, local_rev = acked_rev, pushing_rev = acked_rev, intent = NULL, " +
+            "group_id = NULL, conflict_id = NULL " +
+            "WHERE scope_id = :scopeId AND collection_id = :collectionId",
+    )
+    public suspend fun abandonLocalChanges(
+        scopeId: String,
+        collectionId: String,
+    )
+
+    /**
      * Removes every record of a scope, used when the scope's data is wiped.
      *
      * @param scopeId Scope to wipe.

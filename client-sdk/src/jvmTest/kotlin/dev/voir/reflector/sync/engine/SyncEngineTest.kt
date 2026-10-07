@@ -478,7 +478,11 @@ class SyncEngineTest {
             val diagnostics = collection.diagnostics()
             assertTrue(diagnostics.queue.isEmpty(), "the queue is empty")
             assertEquals(0, diagnostics.pendingCount, "nothing is waiting to be sent")
-            assertEquals(SyncPhase.RESYNC_REQUIRED, diagnostics.phase, "the rebuild is still owed")
+            // Either: the cycle the discard asks for may already have begun the snapshot it cannot fetch.
+            assertTrue(
+                diagnostics.phase == SyncPhase.RESYNC_REQUIRED || diagnostics.phase == SyncPhase.BOOTSTRAPPING,
+                "the rebuild is still owed, but the phase was ${diagnostics.phase}",
+            )
             assertNull(stores.records.find(scopeId, ledger, wallet, walletId), "the record went with the row")
 
             val pushesBefore = transport.pushes.size

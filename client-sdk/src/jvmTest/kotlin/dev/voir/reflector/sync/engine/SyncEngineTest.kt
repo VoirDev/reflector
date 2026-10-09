@@ -33,6 +33,7 @@ import dev.voir.reflector.sync.protocol.Cursor
 import dev.voir.reflector.sync.protocol.EntityId
 import dev.voir.reflector.sync.protocol.EntityType
 import dev.voir.reflector.sync.protocol.EntityVersion
+import dev.voir.reflector.sync.protocol.push.PushOperation
 import dev.voir.reflector.sync.protocol.ScopeId
 import dev.voir.reflector.sync.protocol.changes.ChangeBatch
 import dev.voir.reflector.sync.protocol.changes.ChangesPage
@@ -56,6 +57,8 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.async
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -586,6 +589,78 @@ class SyncEngineTest {
                     .flatMap { push -> push.groups.flatMap { it.ops } }
                     .filter { it.id == walletId }
             assertTrue(sent.all { it.baseVersion == null }, "the edit claims no server state as its base")
+        }
+
+    @Test
+    fun `adopted rows are sent as created, in order, in groups within the server's limit`() =
+        runBlocking<Unit> {
+            transport.limits = transport.limits.copy(maxOperationsPerGroup = 2)
+            transport.onSnapshot = { emptySnapshot() }
+            transport.onPush = ::applyingEverything
+            val collection = engine(workers).scope(scopeId).collection(ledger)
+            // Rows the application wrote before there was anybody to synchronise them for.
+            val ids = (1..5).map { n -> EntityId(Uuid.parse("00000000-0000-7000-8000-20000000000$n")) }
+            ids.forEach { id -> adapter.bodies[wallet to id] = buildJsonObject { put("title", "Wallet $id") } }
+
+            val adopted = collection.adopt(wallet, ids)
+
+            assertEquals(5, adopted)
+            // Counted from the log rather than read from the state, which may still describe the
+            // moment before the rows were queued.
+            awaitRecords("three groups applied") {
+                logs.records.value.count { it.event == SyncLogEvent.PUSH_APPLIED } == 3
+            }
+            val groups = transport.pushes.map { push -> push.groups.single().ops.map { it.id } }
+            assertEquals(listOf(ids.take(2), ids.subList(2, 4), ids.drop(4)), groups)
+            assertTrue(
+                transport.pushes.flatMap { it.groups.single().ops }.all { it is PushOperation.Upsert },
+                "every row is sent as created",
+            )
+            awaitRecord("the adoption being reported") { it.event == SyncLogEvent.ENTITIES_ADOPTED }
+        }
+
+    @Test
+    fun `adopting leaves tracked rows alone, so repeating it queues nothing`() =
+        runBlocking<Unit> {
+            transport.onSnapshot = { walletSnapshot("Cash") }
+            val collection = engine(workers).scope(scopeId).collection(ledger)
+            collection.state.await("a live collection") { it.phase == SyncPhase.LIVE }
+            goOffline()
+            val newId = EntityId(Uuid.parse("00000000-0000-7000-8000-300000000001"))
+            adapter.bodies[wallet to newId] = buildJsonObject { put("title", "Savings") }
+
+            // The pulled wallet is the server's already; only the new one is taken.
+            assertEquals(1, collection.adopt(wallet, listOf(walletId, newId, newId)))
+            assertEquals(0, collection.adopt(wallet, listOf(walletId, newId)))
+
+            val diagnostics = collection.diagnostics()
+            assertEquals(1, diagnostics.queue.size, "one group, not one per call")
+            assertEquals(1, diagnostics.pendingCount)
+            val pulled = assertNotNull(stores.records.find(scopeId, ledger, wallet, walletId))
+            assertEquals(EntityVersion("1"), pulled.serverVersion, "the tracked row is untouched")
+        }
+
+    @Test
+    fun `adopting waits for the server's limits and queues nothing before them`() =
+        runBlocking<Unit> {
+            transport.limitsUnreachable = true
+            transport.onSnapshot = { emptySnapshot() }
+            transport.onPush = ::applyingEverything
+            val collection = engine(workers).scope(scopeId).collection(ledger)
+            adapter.bodies[wallet to walletId] = buildJsonObject { put("title", "Cash") }
+
+            val adoption = async { collection.adopt(wallet, listOf(walletId)) }
+            awaitRecord("a cycle that could not read the limits") { it.event == SyncLogEvent.REQUEST_FAILED }
+
+            assertTrue(adoption.isActive, "nothing can be grouped before the limit is known")
+            assertNull(stores.records.find(scopeId, ledger, wallet, walletId), "and nothing was queued")
+
+            transport.limitsUnreachable = false
+            collection.requestSync()
+
+            assertEquals(1, withTimeout(AWAIT_TIMEOUT_MILLIS) { adoption.await() })
+            awaitRecord("the adopted row applied") { it.event == SyncLogEvent.PUSH_APPLIED }
+            assertEquals(walletId, transport.pushes.single().groups.single().ops.single().id)
         }
 
     @Test

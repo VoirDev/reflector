@@ -7,6 +7,8 @@ import dev.voir.reflector.sync.core.conflict.ConflictId
 import dev.voir.reflector.sync.core.conflict.Resolution
 import dev.voir.reflector.sync.core.diagnostics.CollectionDiagnostics
 import dev.voir.reflector.sync.protocol.BlobId
+import dev.voir.reflector.sync.protocol.EntityId
+import dev.voir.reflector.sync.protocol.EntityType
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
 
@@ -154,6 +156,47 @@ public interface CollectionHandle {
      * @return Whatever the block returns.
      */
     public suspend fun <R> mutate(block: suspend MutationScope.() -> R): R
+
+    /**
+     * Takes rows the application already holds, and the library has never been told about, into
+     * synchronisation, so that each is sent to the server as created.
+     *
+     * For data that existed before there was anybody to synchronise it for — a device used without
+     * an account whose owner now signs in, a store migrated in from elsewhere. [mutate] is the
+     * wrong tool there: a block is one group, and a group cannot be split without breaking the
+     * atomicity it was made for, so a block marking every row of a large table would be refused as
+     * too large and would then block the queue behind it.
+     *
+     * These rows were never changed together, so nothing ties them to each other. They are queued
+     * as several groups, each within the server's limit on operations per group, in the order
+     * given — which is the order they reach the server, so a row another one refers to belongs
+     * earlier in the list, or in an earlier call. All of them are queued in one transaction, so a
+     * process that dies part-way leaves none of them queued rather than some.
+     *
+     * Only rows the library has no record of are taken. A row it already tracks — synchronised,
+     * waiting to be sent, or pulled from the server — is left exactly as it is, which makes a
+     * repeated call with the same identifiers queue nothing the second time.
+     *
+     * The limit is the server's, so this waits until this device has heard it, which the first
+     * cycle after the collection is opened asks for. Offline, or with credentials the server no
+     * longer accepts, that wait lasts until the connection is back; a caller that cannot wait that
+     * long bounds it with a timeout of its own. Nothing is queued before the wait ends.
+     *
+     * Bodies are read through the adapter at push time, as for every other change, and the files
+     * each document names are declared with it. A row whose identifier the server already holds is
+     * a conflict, settled as any other: the library cannot tell one from a row it never saw.
+     *
+     * Must not be called from inside the adapter's callbacks: it may wait on a cycle, and they run
+     * inside that cycle.
+     *
+     * @param entityType Type of every row in [ids].
+     * @param ids Rows to take in, in the order they should reach the server. Duplicates count once.
+     * @return How many rows were queued: those the library had no record of.
+     */
+    public suspend fun adopt(
+        entityType: EntityType,
+        ids: List<EntityId>,
+    ): Int
 
     /**
      * Asks the workers to synchronise now instead of waiting for the next trigger.

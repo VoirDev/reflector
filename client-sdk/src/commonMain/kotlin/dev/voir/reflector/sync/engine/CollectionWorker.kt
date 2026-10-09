@@ -47,6 +47,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.first
 import kotlin.concurrent.Volatile
 import kotlin.coroutines.AbstractCoroutineContextElement
 import kotlin.coroutines.CoroutineContext
@@ -143,7 +145,11 @@ internal class CollectionWorker(
     private val conflicts =
         ConflictCoordinator(scope, collection, stores, transactions, adapter, log, newUuid, references)
 
-    private var limits: SyncLimits? = null
+    /**
+     * The server's limits once heard, `null` before. Observable so that [awaitLimits] can wait for
+     * the cycle that asks for them rather than asking a second time on its own.
+     */
+    private val limits = MutableStateFlow<SyncLimits?>(null)
     private var clientId: ClientId? = null
 
     /**
@@ -781,10 +787,10 @@ internal class CollectionWorker(
      * @return The limits, or `null` when they could not be read and the cycle has to end here.
      */
     private suspend fun limits(): SyncLimits? {
-        limits?.let { return it }
+        limits.value?.let { return it }
         return try {
             transport.limits().also {
-                limits = it
+                limits.value = it
                 // Server-wide rather than the scope's, so it says the server answered and nothing
                 // about whether this user may still read the scope.
                 recordSuccess(provesAccess = false)
@@ -796,6 +802,21 @@ internal class CollectionWorker(
             recordFailure(failure)
             null
         }
+    }
+
+    /**
+     * Waits until the server's limits are known, asking for a cycle if they are not yet.
+     *
+     * The cycle is what reads them, so this never sends a request of its own: two callers asking
+     * at once share one answer, and a failure is reported once, by the cycle, in the usual way.
+     * While the server cannot be reached the wait lasts; the worker keeps retrying on its triggers.
+     *
+     * @return The limits the server published.
+     */
+    suspend fun awaitLimits(): SyncLimits {
+        limits.value?.let { return it }
+        requestSync()
+        return limits.filterNotNull().first()
     }
 
     private suspend fun clientId(): ClientId {

@@ -305,6 +305,27 @@ entity outlives your row: it carries the acknowledged version, which is what sup
 your own deletion when it comes back through the log. It is cleared by the next bootstrap's sweep,
 where the entity is simply absent from the snapshot.
 
+### Rows you had before there was anybody to sync them for
+
+A device used without an account, whose owner then signs in, holds rows the library was never told
+about — and never will be by `mutate`, which you would have to call once per row or once for the
+lot. Once per row is thousands of round trips. Once for the lot is one group, refused as too large
+before it leaves the device, and blocking everything queued behind it.
+
+```kotlin
+val scope = engine.scope(ScopeId(ownerId))
+val ledger = scope.collection(LEDGER)
+
+ledger.adopt(LedgerAdapter.WALLET, walletIds)            // referred to, so first
+ledger.adopt(LedgerAdapter.TRANSACTION, transactionIds)  // queued behind the wallets
+```
+
+Each call queues the rows as groups within the server's limit, in the order you gave, and sends
+them as created. It takes only rows the library has no record of, so calling it again after a crash
+queues nothing twice. It waits until the server's limit is known — the first cycle after opening the
+collection reads it — so call it after `collection(...)`, online, and bound it with a timeout if a
+screen is waiting on it.
+
 ## Reading state
 
 ```kotlin
@@ -543,7 +564,8 @@ adapter. The whole of it — bindings, fetch policies and what your screens have
 2. KSP configured per target.
 3. An adapter per collection, with no transactions and no I/O inside it.
 4. `syncHttpClient` (or a transport that keeps `explicitNulls` and non-throwing status codes).
-5. Every write inside `mutate { }`, with an explicit `markUpserted` / `markDeleted`.
+5. Every write inside `mutate { }`, with an explicit `markUpserted` / `markDeleted` — and rows that
+   existed before the scope did taken in with `adopt`.
 6. A `TokenProvider` that can actually refresh.
 7. Trigger sources for foreground and connectivity — the timer alone is a floor, not a plan.
 8. A resync path for your own schema migrations.

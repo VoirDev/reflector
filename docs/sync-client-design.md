@@ -188,6 +188,25 @@ reacting looks like from here: correcting a refused entity moves it into a later
 leaves behind is a shell whose records are gone. Without that step, refusing to look past the head
 would block the collection permanently.
 
+**Rows that existed before synchronisation: `adopt`.** Data the application held before there was
+an owner to synchronise it for — a device used without an account whose owner now signs in — has
+no metadata row, so nothing would ever send it. Marking all of it inside one `mutate` would be
+correct and useless: one block is one group, a group is never split, and a group holding a whole
+table is refused locally as too large and then blocks the queue behind it.
+
+`adopt(entityType, ids)` is the other shape. Those rows were never changed together, so nothing
+ties them, and they are queued as consecutive groups of at most `maxOperationsPerGroup`, in the
+order given — the order matters for the same reason FIFO does above, so a caller passes the rows
+others refer to first. Every group is created in one transaction: all or nothing, so a process
+that dies part-way leaves nothing to reconcile. Only rows with no metadata row are taken; a row the
+library already tracks keeps its state, which makes the call idempotent and is also why it can
+never pull an existing group into these and make it too large.
+
+The limit is the server's, read by the first cycle. `adopt` waits for that answer rather than
+guessing a size or asking on its own: guessing too high blocks the queue, guessing too low costs a
+round trip per group, and a second request would race the cycle's. Until the limit is known nothing
+is queued.
+
 **The "edited while in flight" race** is closed by revisions: when the envelope is assembled
 `pushing_rev := local_rev`; on ack `acked_rev := pushing_rev`. If `local_rev` moved ahead
 while the envelope was in flight, the record stays dirty and after the ack joins a new group.
@@ -818,6 +837,7 @@ interface CollectionHandle {
                                                //        NEEDS_ATTENTION | RESYNC_REQUIRED
     val conflicts: Flow<List<Conflict>>        // only what the adapter did not resolve itself
     suspend fun <R> mutate(block: suspend MutationScope.() -> R): R   // = withTransaction
+    suspend fun adopt(entityType: EntityType, ids: List<EntityId>): Int  // pre-existing rows; §4
     suspend fun requestSync()
     suspend fun requestResync()                // drop the cursor and fetch the snapshot again
     val refusals: Flow<List<RefusedGroup>>     // groups refused for good, read from storage

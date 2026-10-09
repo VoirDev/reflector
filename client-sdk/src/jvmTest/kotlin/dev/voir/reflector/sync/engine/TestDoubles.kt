@@ -10,6 +10,7 @@ import dev.voir.reflector.sync.core.conflict.Resolution
 import dev.voir.reflector.sync.core.metrics.SyncMetricEvent
 import dev.voir.reflector.sync.core.metrics.SyncMetrics
 import dev.voir.reflector.sync.core.transport.SyncTransport
+import dev.voir.reflector.sync.core.transport.SyncTransportFailure
 import dev.voir.reflector.sync.protocol.CollectionEpoch
 import dev.voir.reflector.sync.protocol.CollectionId
 import dev.voir.reflector.sync.protocol.Cursor
@@ -90,7 +91,13 @@ class FakeTransport : SyncTransport {
         limit: Int,
     ): SnapshotPage = onSnapshot(page)
 
-    override suspend fun limits(): SyncLimits = limits
+    /** Whether asking for the limits fails as though the server could not be reached. */
+    var limitsUnreachable: Boolean = false
+
+    override suspend fun limits(): SyncLimits {
+        if (limitsUnreachable) throw SyncTransportFailure.Unreachable("offline")
+        return limits
+    }
 }
 
 /**

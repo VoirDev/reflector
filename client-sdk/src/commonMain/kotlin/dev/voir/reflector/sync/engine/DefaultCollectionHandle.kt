@@ -23,6 +23,8 @@ import dev.voir.reflector.sync.persistence.conflict.StoredConflict
 import dev.voir.reflector.sync.persistence.group.PendingGroup
 import dev.voir.reflector.sync.protocol.BlobId
 import dev.voir.reflector.sync.protocol.CollectionId
+import dev.voir.reflector.sync.protocol.EntityId
+import dev.voir.reflector.sync.protocol.EntityType
 import dev.voir.reflector.sync.protocol.ScopeId
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.Flow
@@ -126,6 +128,17 @@ internal class DefaultCollectionHandle(
         // network allows; waiting for the next timer would look like the change was lost.
         worker.requestSync()
         return result
+    }
+
+    override suspend fun adopt(
+        entityType: EntityType,
+        ids: List<EntityId>,
+    ): Int {
+        if (ids.isEmpty()) return 0
+        val limits = worker.awaitLimits()
+        val adopted = mutations.adopt(scope, collection, entityType, ids, limits.maxOperationsPerGroup)
+        if (adopted > 0) worker.requestSync()
+        return adopted
     }
 
     override suspend fun requestSync() {

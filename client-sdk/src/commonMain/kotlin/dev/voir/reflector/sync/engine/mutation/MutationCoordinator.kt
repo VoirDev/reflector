@@ -5,7 +5,10 @@ import dev.voir.reflector.sync.core.log.SyncLogger
 import dev.voir.reflector.sync.persistence.SyncStores
 import dev.voir.reflector.sync.persistence.SyncTransactionRunner
 import dev.voir.reflector.sync.persistence.group.PushGroupState
+import dev.voir.reflector.sync.persistence.record.MutationIntent
 import dev.voir.reflector.sync.protocol.CollectionId
+import dev.voir.reflector.sync.protocol.EntityId
+import dev.voir.reflector.sync.protocol.EntityType
 import dev.voir.reflector.sync.protocol.GroupId
 import dev.voir.reflector.sync.protocol.ScopeId
 
@@ -54,6 +57,66 @@ internal class MutationCoordinator(
             queue(scope, collection, recorder)
             result
         }
+
+    /**
+     * Queues rows the library has never been told about, as groups of at most [groupSize].
+     *
+     * One transaction for every group: either all of the rows are queued or none of them is, so a
+     * caller repeating the call after a crash finds nothing half done. Rows that already have a
+     * record are skipped rather than marked, which is what makes the repeat queue nothing — marking
+     * them would merge their groups into these and could make a group too large to send.
+     *
+     * @param scope Scope of the collection.
+     * @param collection Collection the rows belong to.
+     * @param entityType Type of every row.
+     * @param ids Rows to queue, in the order they should be sent.
+     * @param groupSize Most operations one group may hold: the server's limit.
+     * @return How many rows were queued.
+     */
+    suspend fun adopt(
+        scope: ScopeId,
+        collection: CollectionId,
+        entityType: EntityType,
+        ids: List<EntityId>,
+        groupSize: Int,
+    ): Int {
+        require(groupSize > 0) { "a group must be able to hold at least one operation" }
+        val adopted =
+            transactions.transaction {
+                val generation = stores.collections.ensure(scope, collection).generation
+                val untracked =
+                    ids.distinct().filter { id -> stores.records.find(scope, collection, entityType, id) == null }
+                for (chunk in untracked.chunked(groupSize)) {
+                    val groupId = newGroupId()
+                    stores.groups.create(scope, collection, groupId)
+                    for (id in chunk) {
+                        stores.records.markMutation(
+                            scope = scope,
+                            collection = collection,
+                            entityType = entityType,
+                            entityId = id,
+                            intent = MutationIntent.UPSERT,
+                            groupId = groupId,
+                            generation = generation,
+                        )
+                    }
+                }
+                untracked.size
+            }
+        // Said once per call, with the numbers: the answer to "where did this queue come from".
+        log.info(
+            SyncLogEvent.ENTITIES_ADOPTED,
+            context = {
+                mapOf(
+                    "entityType" to entityType.value,
+                    "adopted" to adopted.toString(),
+                    "skipped" to (ids.size - adopted).toString(),
+                    "groupSize" to groupSize.toString(),
+                )
+            },
+        ) { "rows the library had never been told about were queued to be sent as created" }
+        return adopted
+    }
 
     private suspend fun queue(
         scope: ScopeId,

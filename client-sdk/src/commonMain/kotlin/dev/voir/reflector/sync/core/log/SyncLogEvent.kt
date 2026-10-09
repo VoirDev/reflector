@@ -87,6 +87,14 @@ public enum class SyncLogEvent(
     GROUPS_MERGED(SyncLogSource.MUTATION),
 
     /**
+     * Rows the application already held were taken into synchronisation.
+     *
+     * Reported at `INFO` with how many were queued and how many were already tracked: a queue that
+     * suddenly holds thousands of groups was put there on purpose, and this is where it says so.
+     */
+    ENTITIES_ADOPTED(SyncLogSource.MUTATION),
+
+    /**
      * A file named by a document was looked into for the first time.
      *
      * Says which way it is about to travel, which is the one question reconciliation answers: bytes

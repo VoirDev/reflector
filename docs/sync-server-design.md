@@ -106,6 +106,9 @@ interface SyncQueries {
 }
 ```
 
+A `StoredDocument` is the body, its version and when it was last written, and the blobs it currently
+references (see [sync-files-design.md §12.1](sync-files-design.md#121-what-the-host-can-read-back)).
+
 And the removals the host schedules or orders, which are not protocol operations at all:
 
 ```kotlin

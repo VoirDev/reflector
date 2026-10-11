@@ -12,6 +12,7 @@ import dev.voir.reflector.sync.server.StoredBlob
 import dev.voir.reflector.sync.server.StoredDocument
 import dev.voir.reflector.sync.server.SyncConfig
 import dev.voir.reflector.sync.server.SyncQueries
+import org.jetbrains.exposed.v1.core.ResultRow
 import org.jetbrains.exposed.v1.core.SortOrder
 import org.jetbrains.exposed.v1.core.and
 import org.jetbrains.exposed.v1.core.eq
@@ -38,8 +39,14 @@ internal class PostgresSyncQueries(
     private val config: SyncConfig,
     private val clock: Clock,
 ) : SyncQueries {
+    /** Resolves a scope's collection to its row; a read never creates one. */
     private val collections = CollectionRows(config, clock)
+
+    /** Reads what the module knows about files. */
     private val blobs = BlobRows()
+
+    /** Reads which files each document points at. */
+    private val references = BlobReferences()
 
     override fun document(
         scope: ScopeId,
@@ -49,15 +56,16 @@ internal class PostgresSyncQueries(
     ): StoredDocument? =
         transaction(database) {
             val row = collections.find(scope, collection) ?: return@transaction null
-            EntitiesTable
-                .selectAll()
-                .where {
-                    (EntitiesTable.collection eq row.id) and
-                        (EntitiesTable.entityType eq type.value) and
-                        (EntitiesTable.entityId eq id.value) and
-                        (EntitiesTable.isDeleted eq false)
-                }.singleOrNull()
-                ?.let(::toDocument)
+            val entity =
+                EntitiesTable
+                    .selectAll()
+                    .where {
+                        (EntitiesTable.collection eq row.id) and
+                            (EntitiesTable.entityType eq type.value) and
+                            (EntitiesTable.entityId eq id.value) and
+                            (EntitiesTable.isDeleted eq false)
+                    }.singleOrNull() ?: return@transaction null
+            toDocument(entity, references.of(row.id, type, listOf(id))[id].orEmpty())
         }
 
     override fun documents(
@@ -89,7 +97,11 @@ internal class PostgresSyncQueries(
                     .toList()
 
             val hasMore = rows.size > capped
-            val documents = rows.take(capped).map(::toDocument)
+            val found = rows.take(capped)
+            // One read for the references of the whole page, in the same transaction, so that each
+            // document's set belongs to the same moment as its body.
+            val blobsOf = references.of(row.id, type, found.map { EntityId(it[EntitiesTable.entityId]) })
+            val documents = found.map { toDocument(it, blobsOf[EntityId(it[EntitiesTable.entityId])].orEmpty()) }
             DocumentPage(
                 documents = documents,
                 nextPage =
@@ -144,12 +156,23 @@ internal class PostgresSyncQueries(
             )
         }
 
-    private fun toDocument(row: org.jetbrains.exposed.v1.core.ResultRow): StoredDocument =
+    /**
+     * Maps a live entity row to what the host is handed.
+     *
+     * @param row Row of [EntitiesTable] for an entity that is not deleted.
+     * @param blobs Blobs the entity currently references, already ordered by identifier.
+     * @return Stored document.
+     */
+    private fun toDocument(
+        row: ResultRow,
+        blobs: List<BlobId>,
+    ): StoredDocument =
         StoredDocument(
             entityType = EntityType(row[EntitiesTable.entityType]),
             entityId = EntityId(row[EntitiesTable.entityId]),
             version = SyncSequences.version(row[EntitiesTable.version]),
             data = checkNotNull(row[EntitiesTable.data]) { "a live entity must have a document" },
             updatedAt = row[EntitiesTable.updatedAt],
+            blobs = blobs,
         )
 }

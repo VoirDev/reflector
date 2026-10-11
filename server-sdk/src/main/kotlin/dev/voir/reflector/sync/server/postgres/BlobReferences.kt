@@ -1,6 +1,9 @@
 package dev.voir.reflector.sync.server.postgres
 
 import dev.voir.reflector.sync.protocol.BlobId
+import dev.voir.reflector.sync.protocol.EntityId
+import dev.voir.reflector.sync.protocol.EntityType
+import org.jetbrains.exposed.v1.core.SortOrder
 import org.jetbrains.exposed.v1.core.and
 import org.jetbrains.exposed.v1.core.eq
 import org.jetbrains.exposed.v1.core.exists
@@ -17,7 +20,8 @@ import kotlin.time.Instant
 import kotlin.uuid.Uuid
 
 /**
- * What each entity's document points at, maintained inside the transaction that writes the batch.
+ * What each entity's document points at, maintained inside the transaction that writes the batch
+ * and read back for the host through [SyncQueries][dev.voir.reflector.sync.server.SyncQueries].
  *
  * References are state-based like everything else in this protocol: a client sends the whole set it
  * declares, and that set replaces what was stored. There is no "reference added" or "reference
@@ -58,6 +62,41 @@ internal class BlobReferences {
                         (BlobsTable.blobId inList declared.map { it.value })
                 }.mapTo(mutableSetOf()) { BlobId(it[BlobsTable.blobId]) }
         return declared - known
+    }
+
+    /**
+     * Reads the blobs each of the given entities of one type currently points at.
+     *
+     * One statement for the whole set, so that a page of documents costs one extra query rather
+     * than one per document. It is served by the primary key, whose leading columns are exactly the
+     * filter and whose trailing ones are the order.
+     *
+     * @param collectionRowId Row identifier of the collection.
+     * @param entityType Type every one of [entityIds] has.
+     * @param entityIds Entities to read the references of.
+     * @return Each entity's blobs ordered by identifier; an entity that points at nothing is absent.
+     */
+    fun of(
+        collectionRowId: Uuid,
+        entityType: EntityType,
+        entityIds: Collection<EntityId>,
+    ): Map<EntityId, List<BlobId>> {
+        if (entityIds.isEmpty()) {
+            return emptyMap()
+        }
+        return BlobRefsTable
+            .select(BlobRefsTable.entityId, BlobRefsTable.blobId)
+            .where {
+                (BlobRefsTable.collection eq collectionRowId) and
+                    (BlobRefsTable.entityType eq entityType.value) and
+                    (BlobRefsTable.entityId inList entityIds.map { it.value })
+            }.orderBy(BlobRefsTable.entityId to SortOrder.ASC, BlobRefsTable.blobId to SortOrder.ASC)
+            // Materialised first: `Query` has a `groupBy` of its own, which is SQL's.
+            .toList()
+            .groupBy(
+                keySelector = { EntityId(it[BlobRefsTable.entityId]) },
+                valueTransform = { BlobId(it[BlobRefsTable.blobId]) },
+            )
     }
 
     /**

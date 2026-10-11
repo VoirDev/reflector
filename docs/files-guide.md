@@ -100,6 +100,11 @@ a client older than files says nothing and is respected, but an application that
 forgets to answer for one entity type says "references nothing", and from the server the two are
 identical.
 
+A document read through `module.queries` carries the files it references in `StoredDocument.blobs`.
+A host that copies documents out and pushes them back later — a backup and its restore — sends that
+list as the `blobs` of each upsert. The files have to be registered in the collection before the push
+that names them, or the group is refused with `BLOB_MISSING`.
+
 ## Client
 
 Three things: say where the bytes live, say which files a document points at, and hand the engine a

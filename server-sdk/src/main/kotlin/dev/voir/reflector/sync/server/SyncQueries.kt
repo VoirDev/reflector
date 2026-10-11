@@ -16,7 +16,7 @@ import dev.voir.reflector.sync.protocol.ScopeId
  */
 public interface SyncQueries {
     /**
-     * Reads one stored document.
+     * Reads one stored document, together with the blobs it currently references.
      *
      * @param scope Authorised scope the collection belongs to.
      * @param collection Collection the entity belongs to.
@@ -32,7 +32,10 @@ public interface SyncQueries {
     ): StoredDocument?
 
     /**
-     * Reads a page of stored documents of one type.
+     * Reads a page of stored documents of one type, each with the blobs it currently references.
+     *
+     * Every document of the page and its references are read in one transaction, so a document's
+     * [StoredDocument.blobs] describe the same moment as its body.
      *
      * @param scope Authorised scope the collection belongs to.
      * @param collection Collection to read.

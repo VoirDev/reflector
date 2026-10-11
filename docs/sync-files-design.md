@@ -1196,6 +1196,14 @@ cursor, because every page of one snapshot has to describe the same moment; this
 promise — it is an administrative view of a table that is still being written — so the position is
 the whole of it.
 
+`StoredDocument`, from `document` and `documents`, carries `blobs`: the entity's current rows in
+`sync.blob_refs`, ordered by blob identifier, empty when there are none. A page reads them for all of
+its documents in one statement, filtered by collection, entity type and the page's identifiers —
+the leading columns of `pk_blob_refs` — inside the transaction that reads the bodies. The host needs
+them because references are a declaration rather than something derivable from the body: a host
+that copies documents out and pushes them back has to declare them again, or the restored documents
+reference nothing and their files are collected after the retention window.
+
 ## 13. Where the tests are
 
 The mechanism here has three seams that nothing above them can check, and each has a suite of its
@@ -1203,8 +1211,9 @@ own rather than being covered incidentally.
 
 `server-sdk` tests the module against real PostgreSQL and a fake bucket: the schema and its cascades
 (`BlobSchemaTest`), registration, verification and the once-per-file acknowledgement
-(`BlobServiceTest`), reference bookkeeping inside the counter lock (`BlobReferenceTest`), and the
-collector, the promotion sweep and purge (`BlobMaintenanceTest`).
+(`BlobServiceTest`), reference bookkeeping inside the counter lock (`BlobReferenceTest`), the
+references the host reads back with each document, and the statement count of a page
+(`DocumentBlobsTest`), and the collector, the promotion sweep and purge (`BlobMaintenanceTest`).
 
 `client-sdk` tests the two halves that are invisible from outside: the queries that decide what is
 work (`SyncBlobDaoTest`), reconciliation, which produces only rows (`BlobReconciliationTest`), and

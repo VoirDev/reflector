@@ -293,7 +293,15 @@ public interface SyncQueries {
 ```
 
 This is the read side for host screens and reports. It reflects the same rows the clients
-synchronise, without going through the protocol.
+synchronise, without going through the protocol. Deleted entities are not returned.
+
+Each `StoredDocument` carries, besides the body, the `blobs` it currently references, ordered by
+identifier — the set the clients declared, which the module stores and never derives from the body.
+A page reads them for all of its documents in one extra statement, inside the same transaction as
+the bodies. If you copy documents out — a backup, an export you will import again — keep that list
+with each one and send it back as the `blobs` of the `PushOperation.Upsert` that restores it: a
+document pushed without it references nothing, and its files are collected once the retention window
+passes.
 
 ## Erasing a scope
 

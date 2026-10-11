@@ -18,6 +18,10 @@ import dev.voir.reflector.sync.server.syncConfig
 import org.jetbrains.exposed.v1.jdbc.Database
 import org.jetbrains.exposed.v1.jdbc.transactions.transaction
 import org.testcontainers.postgresql.PostgreSQLContainer
+import java.lang.reflect.InvocationTargetException
+import java.lang.reflect.Proxy
+import java.sql.Connection
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.time.Clock
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.days
@@ -48,11 +52,14 @@ object PostgresFixture {
             },
         )
 
-    /** Database the module writes to; migrations have already been applied. */
-    val database: Database by lazy {
+    /** The connection pool, handed out only once the module's migrations have been applied. */
+    private val migrated: HikariDataSource by lazy {
         SyncMigrations.migrate(dataSource)
-        Database.connect(dataSource)
+        dataSource
     }
+
+    /** Database the module writes to; migrations have already been applied. */
+    val database: Database by lazy { Database.connect(migrated) }
 
     /** Scope every test writes to. */
     val scope: ScopeId = ScopeId("user-1")
@@ -67,6 +74,35 @@ object PostgresFixture {
     val wallet: EntityType = EntityType("wallet")
 
     /**
+     * The shared database, reached through connections that count every statement they are asked for.
+     *
+     * The module opens its own transactions, so the connection is the one place a test can stand to
+     * see how many statements an operation costs — which is what guards a read against turning into
+     * one query per row.
+     *
+     * @param counter Incremented once for every statement prepared or created.
+     * @return Database over the same container, with migrations already applied.
+     */
+    fun countingDatabase(counter: AtomicInteger): Database =
+        Database.connect(getNewConnection = { counting(migrated.connection, counter) })
+
+    /** Wraps [connection] so that every statement it hands out is counted, and nothing else changes. */
+    private fun counting(
+        connection: Connection,
+        counter: AtomicInteger,
+    ): Connection =
+        Proxy.newProxyInstance(Connection::class.java.classLoader, arrayOf(Connection::class.java)) { _, method, args ->
+            if (method.name in STATEMENT_FACTORIES) {
+                counter.incrementAndGet()
+            }
+            try {
+                method.invoke(connection, *args.orEmpty())
+            } catch (e: InvocationTargetException) {
+                throw e.targetException
+            }
+        } as Connection
+
+    /**
      * Builds a module over the shared database.
      *
      * @param clock Clock the module reads timestamps from.
@@ -79,6 +115,7 @@ object PostgresFixture {
      * @param blobs Configuration of files, or `null` to assemble a module that serves none.
      * @param blobStorage The host's object storage; required exactly when [blobs] is given.
      * @param blobListeners Told when a blob's bytes are accepted.
+     * @param database Database the module writes to; the shared one unless a test needs to watch it.
      * @return Freshly assembled module.
      */
     fun module(
@@ -92,6 +129,7 @@ object PostgresFixture {
         blobs: BlobConfig? = null,
         blobStorage: BlobStorage? = null,
         blobListeners: List<BlobListener> = emptyList(),
+        database: Database = this.database,
     ): SyncModule =
         SyncModule.create(
             database = database,
@@ -126,6 +164,9 @@ object PostgresFixture {
     }
 
     private const val POOL_SIZE = 8
+
+    /** The methods of [Connection] that hand out a statement. */
+    private val STATEMENT_FACTORIES = setOf("prepareStatement", "createStatement", "prepareCall")
 
     /** Small enough that a test can exceed it on purpose. */
     const val MAX_DOCUMENT_BYTES: Int = 4096

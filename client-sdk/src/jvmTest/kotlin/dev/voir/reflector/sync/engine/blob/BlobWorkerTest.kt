@@ -1,5 +1,6 @@
 package dev.voir.reflector.sync.engine.blob
 
+import dev.voir.reflector.sync.core.SyncPause
 import dev.voir.reflector.sync.core.adapter.CollectionAdapter
 import dev.voir.reflector.sync.core.blob.BlobBinding
 import dev.voir.reflector.sync.core.blob.BlobFailure
@@ -246,6 +247,39 @@ class BlobWorkerTest {
         }
 
     @Test
+    fun `a file this device holds waits while uploads are paused and goes once they resume`() =
+        runBlocking<Unit> {
+            // The file has to be known before the pause: a record is what introduces it, and a record
+            // does not leave while uploads are paused. So its first upload is let fail.
+            blobs.failWith = SyncTransportFailure.Unreachable("the connection dropped")
+            val scope = engineOf().scope(scopeId)
+            val handle = scope.collection(ledger)
+            files.bytes[photo] = BlobStat(SIZE, BlobContentType("image/jpeg"))
+            handle.mutate {
+                adapter.bodies[wallet to walletId] = buildJsonObject { put("title", "Cash") }
+                adapter.references[wallet to walletId] = setOf(BlobRef(photo, BlobBinding.DEFERRED))
+                markUpserted(wallet, walletId)
+            }
+            await("the first upload failing") { recordOf(photo)?.attempts == 1 }
+
+            scope.pause(SyncPause.UPLOADS)
+            blobs.failWith = null
+            val asked = blobs.registered.size
+            // Due now, and asked for: the pause is the only thing left that can hold it back.
+            handle.retry(photo)
+            delay(SETTLE)
+
+            assertEquals(asked, blobs.registered.size, "the server was not asked to take the file")
+            val waiting = assertNotNull(recordOf(photo))
+            assertEquals(BlobTransferState.LOCAL, waiting.state)
+            assertEquals(0, waiting.attempts, "a paused upload uses no attempt")
+
+            scope.resume()
+
+            await("the file reaching the server") { stateOf(photo) == BlobTransferState.UPLOADED }
+        }
+
+    @Test
     fun `a record that could not be published before its file goes out once the file has landed`() =
         runBlocking<Unit> {
             attach(binding = BlobBinding.REQUIRED)
@@ -481,5 +515,6 @@ class BlobWorkerTest {
         const val MAX_BYTES = 4L * 1024 * 1024
         const val AWAIT_TIMEOUT = 10_000L
         const val POLL = 20L
+        const val SETTLE = 400L
     }
 }

@@ -155,6 +155,21 @@ public interface SyncBlobDao {
     )
 
     /**
+     * Makes every file of a scope that is waiting for a transfer due now, keeping its attempts.
+     *
+     * What lifting the application's pause means for a transfer that was serving a backoff when it
+     * began, for the same reason it means it for a push group. A file given up on is not waiting on
+     * a clock and is left as it is.
+     *
+     * @param scopeId Scope to clear.
+     */
+    @Query(
+        "UPDATE sync_blob SET next_retry_at = NULL WHERE scope_id = :scopeId " +
+            "AND state IN ('LOCAL', 'UPLOADING', 'REMOTE', 'DOWNLOADING')",
+    )
+    public suspend fun clearRetryWaits(scopeId: String)
+
+    /**
      * Records whether this device is trying to hold a file's bytes.
      *
      * Deliberately touches nothing else. A request has to be able to reach a row that is mid-backoff

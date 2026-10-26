@@ -130,6 +130,15 @@ internal class GroupStore(
     }
 
     /**
+     * Makes every pending group of a scope due now, keeping the attempts each has used.
+     *
+     * @param scope Scope whose groups to clear.
+     */
+    public suspend fun clearRetryWaits(scope: ScopeId) {
+        dao.clearRetryWaits(scope.value, PushGroupState.PENDING)
+    }
+
+    /**
      * Fails a group for good and records the refusal that failed it.
      *
      * @param groupId Group that was refused.

@@ -1,6 +1,7 @@
 package dev.voir.reflector.sync.engine.blob
 
 import dev.voir.reflector.sync.core.CollectionHandle
+import dev.voir.reflector.sync.core.SyncPause
 import dev.voir.reflector.sync.core.adapter.CollectionAdapter
 import dev.voir.reflector.sync.core.blob.BlobFetch
 import dev.voir.reflector.sync.core.blob.BlobRef
@@ -130,12 +131,14 @@ class BlobFetchPolicyTest {
      * @param engineFetch Policy the engine is configured with.
      * @param fetch Policy the document's reference declares, or `null` to leave it to the engine.
      * @param known Whether the server admits to having the file at all.
+     * @param pause What the scope is paused for before the collection is opened, if anything.
      * @return Handle of the collection, for the tests that ask it for the file.
      */
     private fun receiveWallet(
         engineFetch: BlobFetch,
         fetch: BlobFetch? = null,
         known: Boolean = true,
+        pause: SyncPause? = null,
     ): CollectionHandle {
         adapter.references[wallet to walletId] = setOf(BlobRef(photo, fetch = fetch))
         if (known) {
@@ -153,7 +156,9 @@ class BlobFetchPolicyTest {
                 changesNamingPhoto()
             }
         }
-        return engine(engineFetch).scope(scopeId).collection(ledger)
+        val scope = engine(engineFetch).scope(scopeId)
+        pause?.let(scope::pause)
+        return scope.collection(ledger)
     }
 
     private suspend fun await(
@@ -193,6 +198,14 @@ class BlobFetchPolicyTest {
             // Not counted as incoming: nothing is waiting for it, and an application that showed it
             // as arriving would be promising something no transfer is going to produce.
             assertEquals(0, handle.state.value.incomingBlobs)
+        }
+
+    @Test
+    fun `a file is still fetched while the scope's uploads are paused`() =
+        runBlocking<Unit> {
+            receiveWallet(engineFetch = BlobFetch.EAGER, pause = SyncPause.UPLOADS)
+
+            await("the file arriving") { recordOf(photo)?.state == BlobTransferState.READY }
         }
 
     @Test

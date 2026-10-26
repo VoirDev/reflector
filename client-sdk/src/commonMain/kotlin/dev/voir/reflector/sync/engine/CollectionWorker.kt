@@ -2,6 +2,7 @@ package dev.voir.reflector.sync.engine
 
 import dev.voir.reflector.sync.core.ScopeState
 import dev.voir.reflector.sync.core.SyncFailure
+import dev.voir.reflector.sync.core.SyncPause
 import dev.voir.reflector.sync.core.SyncPhase
 import dev.voir.reflector.sync.core.adapter.CollectionAdapter
 import dev.voir.reflector.sync.core.adapter.RemoteOp
@@ -44,6 +45,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -78,6 +80,8 @@ import kotlin.uuid.Uuid
  *   supplies nothing — used only to tell a device with no network apart from a server that is not
  *   answering.
  * @param scopeState State shared by every collection of the scope.
+ * @param paused What the application has paused in the scope, read before each step that would make
+ *   a request: a paused step is not attempted at all, so it uses no attempt and grows no backoff.
  * @param metrics Sink the worker and its coordinators report through.
  * @param log Sink the worker and its coordinators describe their decisions through, already bound
  *   to this collection.
@@ -101,6 +105,7 @@ internal class CollectionWorker(
     private val adapter: CollectionAdapter,
     private val network: NetworkAvailability?,
     private val scopeState: MutableStateFlow<ScopeState>,
+    private val paused: StateFlow<SyncPause?>,
     private val metrics: SyncMetrics,
     private val log: SyncLogger,
     private val coroutineScope: CoroutineScope,
@@ -238,6 +243,10 @@ internal class CollectionWorker(
     }
 
     private suspend fun cycle() {
+        // Before anything, the limits included: a scope paused in full makes no request of any kind.
+        if (paused.value == SyncPause.ALL) {
+            return
+        }
         val startedAt = clock.now()
         log.debug(SyncLogEvent.CYCLE_STARTED) { "a synchronisation cycle began" }
         val limits = limits() ?: return
@@ -302,6 +311,11 @@ internal class CollectionWorker(
             QueueOutcome.STOPPED -> return
             QueueOutcome.RESET -> return resetToServer(bootstrap)
             QueueOutcome.DRAINED -> Unit
+        }
+        // Read again rather than carried from the top: a pause that arrived while the queue drained
+        // takes effect at the next request, and this is one.
+        if (paused.value == SyncPause.ALL) {
+            return
         }
         when (val outcome = pull.pull()) {
             is PullOutcome.Interrupted -> return interrupt(outcome.failure)
@@ -470,6 +484,7 @@ internal class CollectionWorker(
                 log = log,
                 coroutineScope = coroutineScope,
                 clock = clock,
+                paused = paused,
                 // A group held back by a file — waiting for it to be registered, or for its bytes —
                 // has no other way of learning that it may now go.
                 onProgressed = ::requestSync,
@@ -616,12 +631,18 @@ internal class CollectionWorker(
         }
 
     /**
-     * Sends groups until the queue is empty or stops moving.
+     * Sends groups until the queue is empty, stops moving, or the application pauses uploads.
      *
      * @return What the rest of the cycle should do.
      */
     private suspend fun drainQueue(push: PushCoordinator): QueueOutcome {
         while (true) {
+            // Looked at before every group, so that a pause lands between two pushes rather than
+            // after the queue has emptied. A group that is not sent is not touched: it keeps its
+            // state, its attempts and its backoff, and is the head again when the pause is lifted.
+            if (paused.value != null) {
+                return QueueOutcome.DRAINED
+            }
             when (val outcome = push.pushOnce()) {
                 PushOutcome.Applied -> {
                     recordSuccess()
@@ -651,7 +672,7 @@ internal class CollectionWorker(
      * What draining the queue means for the rest of the cycle.
      */
     private enum class QueueOutcome {
-        /** The queue is empty or waiting; carry on and read the log. */
+        /** The queue is empty, waiting or paused; carry on and read the log. */
         DRAINED,
 
         /** The scope needs attention; end the cycle and keep everything as it is. */

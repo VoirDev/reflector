@@ -147,6 +147,23 @@ public interface SyncGroupDao {
     )
 
     /**
+     * Makes every group of a scope in one state due now, keeping the attempts it has used.
+     *
+     * What lifting the application's pause means for a group that was serving a backoff when it
+     * began: the pause is commonly the answer to the refusals that produced the backoff, so the
+     * group goes as soon as the pause ends rather than waiting the rest of it out.
+     *
+     * @param scopeId Scope to clear.
+     * @param state State to clear, always [PushGroupState.PENDING]: a group in any other state is
+     *   not waiting on a clock.
+     */
+    @Query("UPDATE sync_group SET next_retry_at = NULL WHERE scope_id = :scopeId AND state = :state")
+    public suspend fun clearRetryWaits(
+        scopeId: String,
+        state: PushGroupState,
+    )
+
+    /**
      * Fails a group for good, recording what the refusal was and what it named.
      *
      * One statement with the attempt it ends, so a group is never failed without its reason or the

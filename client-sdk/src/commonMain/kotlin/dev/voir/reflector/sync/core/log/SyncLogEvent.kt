@@ -25,6 +25,12 @@ public enum class SyncLogEvent(
     /** The scope moved between online, offline, needing credentials and revoked. */
     SCOPE_STATE_CHANGED(SyncLogSource.ENGINE),
 
+    /** The application paused the scope, or changed what it pauses, with what is now held back. */
+    SCOPE_PAUSED(SyncLogSource.ENGINE),
+
+    /** The application lifted the scope's pause and what it held back was started again. */
+    SCOPE_RESUMED(SyncLogSource.ENGINE),
+
     /** A sign-out stopped the workers and removed the scope's local data. */
     SCOPE_WIPED(SyncLogSource.ENGINE),
 

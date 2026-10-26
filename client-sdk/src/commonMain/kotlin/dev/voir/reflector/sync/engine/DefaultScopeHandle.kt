@@ -4,6 +4,7 @@ import dev.voir.reflector.sync.core.CollectionHandle
 import dev.voir.reflector.sync.core.ConflictThreshold
 import dev.voir.reflector.sync.core.ScopeHandle
 import dev.voir.reflector.sync.core.ScopeState
+import dev.voir.reflector.sync.core.SyncPause
 import dev.voir.reflector.sync.core.SyncPhase
 import dev.voir.reflector.sync.core.adapter.CollectionAdapter
 import dev.voir.reflector.sync.core.blob.BlobFetch
@@ -33,6 +34,7 @@ import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.getAndUpdate
 import kotlinx.coroutines.launch
 import kotlin.time.Clock
 import kotlin.uuid.Uuid
@@ -42,7 +44,8 @@ import kotlin.uuid.Uuid
  *
  * Collections inside a scope are independent — own cursor, own queue, own worker — so the handle is
  * little more than a registry of them. What they do share is the connection state and the answer to
- * "may this user still read this scope at all", which is why that lives here.
+ * "may this user still read this scope at all", which is why that lives here — and so does the
+ * application's pause, which it decides for the scope as a whole.
  *
  * @param scopeId Scope being synchronised.
  * @param stores Storage of the library.
@@ -88,6 +91,7 @@ internal class DefaultScopeHandle(
 ) : ScopeHandle {
     private val logger = SyncLogger(log, scopeId)
     private val mutableState = MutableStateFlow<ScopeState>(ScopeState.Online)
+    private val mutablePaused = MutableStateFlow<SyncPause?>(null)
     private val handles = mutableMapOf<CollectionId, CollectionHandle>()
     private val workersByCollection = mutableMapOf<CollectionId, CollectionWorker>()
 
@@ -98,6 +102,8 @@ internal class DefaultScopeHandle(
     private val workerScope = CoroutineScope(coroutineScope.coroutineContext + workers)
 
     override val state: StateFlow<ScopeState> = mutableState.asStateFlow()
+
+    override val paused: StateFlow<SyncPause?> = mutablePaused.asStateFlow()
 
     init {
         // Every collection's worker can move this, so it is reported from the one place that sees
@@ -141,6 +147,7 @@ internal class DefaultScopeHandle(
                     adapter = adapter,
                     network = network,
                     scopeState = mutableState,
+                    paused = paused,
                     metrics = metrics,
                     log = logger.forCollection(id),
                     coroutineScope = workerScope,
@@ -175,6 +182,51 @@ internal class DefaultScopeHandle(
                 coroutineScope = coroutineScope,
             ).also { worker.requestSync() }
         }
+
+    override fun pause(what: SyncPause) {
+        val previous = mutablePaused.getAndUpdate { what }
+        if (previous == what) {
+            return
+        }
+        logger.info(
+            SyncLogEvent.SCOPE_PAUSED,
+            context = { mapOf("paused" to what.name, "previously" to (previous?.name ?: "none")) },
+        ) {
+            when (what) {
+                SyncPause.UPLOADS -> {
+                    "the application paused uploads; local changes queue and reads carry on"
+                }
+
+                SyncPause.ALL -> {
+                    "the application paused the scope; its workers make no requests until it resumes"
+                }
+            }
+        }
+        // Narrowing a full pause to uploads lets reads go again, and nothing else would wake them.
+        if (what == SyncPause.UPLOADS) {
+            workersByCollection.values.forEach { it.requestSync() }
+        }
+    }
+
+    override suspend fun resume() {
+        if (mutablePaused.value == null) {
+            return
+        }
+        // The waits are cleared before the pause is lifted, so that no cycle the lifting lets run
+        // can find a group still serving a backoff that the pause has made meaningless.
+        transactions.transaction {
+            stores.groups.clearRetryWaits(scopeId)
+            stores.blobs.clearRetryWaits(scopeId)
+        }
+        val previous = mutablePaused.getAndUpdate { null } ?: return
+        logger.info(SyncLogEvent.SCOPE_RESUMED, context = { mapOf("previously" to previous.name) }) {
+            "the application lifted the pause; what it held back is sent now"
+        }
+        workersByCollection.values.forEach { worker ->
+            worker.requestSync()
+            worker.requestTransfers()
+        }
+    }
 
     /**
      * Reacts to the server's notifications.

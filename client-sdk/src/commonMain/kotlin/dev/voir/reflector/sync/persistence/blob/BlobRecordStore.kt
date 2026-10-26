@@ -350,6 +350,15 @@ internal class BlobRecordStore(
     suspend fun allOfScope(scope: ScopeId): List<BlobRecord> = dao.allOfScope(scope.value).map { it.toRecord() }
 
     /**
+     * Makes every file of a scope that is waiting for a transfer due now, keeping its attempts.
+     *
+     * @param scope Scope whose files to clear.
+     */
+    suspend fun clearRetryWaits(scope: ScopeId) {
+        dao.clearRetryWaits(scope.value)
+    }
+
+    /**
      * Forgets every file of a scope.
      *
      * @param scope Scope to clear.

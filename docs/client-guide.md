@@ -13,7 +13,8 @@ Why the mechanism is shaped this way is in [How it works](concepts.md) and in th
 [One database for both](#one-database-for-both) · [The adapter](#the-adapter--the-whole-integration-contract) ·
 [Transport](#transport) · [Wiring the engine](#wiring-the-engine) · [Writing data](#writing-data) ·
 [Reading state](#reading-state) · [Conflicts](#conflicts-in-the-user-interface) · [Triggers](#triggers) ·
-[Metrics](#numbers-if-you-want-to-know-how-it-is-going) · [Sign-out and resync](#sign-out-and-resync) ·
+[Metrics](#numbers-if-you-want-to-know-how-it-is-going) · [Pausing](#pausing) ·
+[Sign-out and resync](#sign-out-and-resync) ·
 [Files](#files) · [Checklist](#checklist)
 
 ## Dependencies
@@ -516,6 +517,50 @@ is a dashboard.
 There is no cursor lag here, and there cannot be: a cursor is opaque to the client, so the distance
 to the head is the server's arithmetic — `ChangesServed.cursorLag` in the [server guide](server-guide.md#numbers-if-you-want-to-know-how-it-is-going). Implementations run on
 the collection's worker and must not throw; a throw is swallowed and you lose the metric.
+
+## Pausing
+
+Your application may decide that a scope should stop sending for a while, or stop syncing
+altogether. The library doesn't know or ask why. It only does what it is told and reports it:
+
+```kotlin
+val scope = engine.scope(scopeId)
+scope.pause(SyncPause.UPLOADS)   // nothing leaves the device; the log, snapshots and downloads go on
+scope.pause(SyncPause.ALL)       // no requests at all
+scope.resume()                   // send what was held back, now
+scope.paused                     // StateFlow<SyncPause?>, null while nothing is paused
+```
+
+A pause is not a failure. A group that is held back is never attempted, so it stays `PENDING`. It
+uses no attempt, serves no backoff and records no error. `pendingCount` keeps counting it, and
+`lastFailure` doesn't change. Local changes keep being recorded under either pause. File uploads
+wait the same way, and so do downloads under `ALL`.
+
+A pause takes effect between requests: a push or a transfer that is already under way finishes and
+its answer is applied. `resume()` makes anything that was serving a backoff due at once, including a
+`Retry-After`, so the queue goes out straight away. It keeps the attempts already used.
+
+`paused` is kept apart from `scope.state` because the two answer different questions. A scope whose
+uploads are paused still reads from the server, and can still go `Offline`, need the user to sign in
+again, or be `Revoked`. Your status line should keep showing those.
+
+A pause lives in memory and a new process starts unpaused. If the reason for it outlives the process,
+apply it again on start, after `engine.scope(...)` and before the first `scope.collection(...)`,
+because opening a collection starts its worker:
+
+```kotlin
+val scope = engine.scope(scopeId)
+if (!syncAllowed) scope.pause(SyncPause.UPLOADS)
+val ledger = scope.collection(CollectionId("ledger"))
+```
+
+The order matters only for tidiness. If a push gets out before the pause and the server refuses it,
+it is retried like any server error and loses nothing.
+
+A host may refuse a push or a file upload with a status the protocol doesn't name, such as
+`402 Payment Required`. That arrives as `SyncFailure.Server(statusCode = 402, ...)`, and the group is
+retried with backoff like any other server error. Pausing on that is your application's decision.
+The library has no case of its own for it.
 
 ## Sign-out and resync
 

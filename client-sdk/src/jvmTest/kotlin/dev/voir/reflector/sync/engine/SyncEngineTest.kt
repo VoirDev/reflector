@@ -6,6 +6,7 @@ import dev.voir.reflector.sync.core.RefusedGroup
 import dev.voir.reflector.sync.core.ScopeState
 import dev.voir.reflector.sync.core.SyncEngine
 import dev.voir.reflector.sync.core.SyncFailure
+import dev.voir.reflector.sync.core.SyncPause
 import dev.voir.reflector.sync.core.SyncPhase
 import dev.voir.reflector.sync.core.adapter.CollectionAdapter
 import dev.voir.reflector.sync.core.adapter.SchemaFingerprint
@@ -72,6 +73,8 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
+import kotlin.time.Clock
+import kotlin.time.Duration.Companion.hours
 import kotlin.uuid.Uuid
 
 /**
@@ -214,6 +217,7 @@ class SyncEngineTest {
         triggerSources: List<SyncTriggerSource> = emptyList(),
         conflictThreshold: ConflictThreshold = ConflictThreshold.Default,
         network: NetworkAvailability? = null,
+        clock: Clock = Clock.System,
     ): SyncEngine =
         SyncEngine(
             database = database,
@@ -226,6 +230,7 @@ class SyncEngineTest {
             triggerSources = triggerSources,
             conflictThreshold = conflictThreshold,
             log = logs,
+            clock = clock,
         )
 
     /** Everything the engine said while a test ran, so that a test can assert on what it reported. */
@@ -1086,6 +1091,112 @@ class SyncEngineTest {
             assertNotNull(woken, "a trigger the application produced has to reach the worker")
         }
 
+    @Test
+    fun `a scope paused for uploads keeps its queue as it was and goes on reading`() =
+        runBlocking<Unit> {
+            transport.onSnapshot = { emptySnapshot() }
+            var pulls = 0
+            transport.onChanges = {
+                pulls++
+                ChangesPage(emptyList(), nextCursor = null, hasMore = false, epoch = TEST_EPOCH)
+            }
+            val scope = engine(workers).scope(scopeId)
+            // Before the collection is opened, which is what an application re-applying a pause on
+            // start does: the first cycle must already find it.
+            scope.pause(SyncPause.UPLOADS)
+            val collection = scope.collection(ledger)
+            collection.state.await("a live collection") { it.phase == SyncPhase.LIVE }
+            val pullsBefore = pulls
+            val cyclesBefore = cyclesFinished()
+
+            collection.mutate {
+                adapter.bodies[wallet to walletId] = buildJsonObject { put("title", "Cash") }
+                markUpserted(wallet, walletId)
+            }
+            awaitRecords("a cycle after the change") { cyclesFinished() > cyclesBefore }
+
+            assertTrue(transport.pushes.isEmpty(), "nothing may leave while uploads are paused")
+            assertTrue(pulls > pullsBefore, "reading the log is not what was paused")
+            // Not sent is not failed: no attempt, no backoff, nothing for the application to see.
+            val head = collection.diagnostics().queue.single()
+            assertEquals(PushGroupState.PENDING, head.state)
+            assertEquals(0, head.attempts)
+            assertNull(head.nextRetryAt)
+            assertNull(collection.state.value.lastFailure)
+            assertEquals(1, collection.state.value.pendingCount)
+            assertEquals(ScopeState.Online, scope.state.value, "a pause is not a connection state")
+            assertEquals(SyncPause.UPLOADS, scope.paused.value)
+
+            transport.onPush = ::applyingEverything
+            scope.resume()
+
+            collection.state.await("the queue drained after resuming") { it.pendingCount == 0 }
+            assertNull(scope.paused.value)
+        }
+
+    @Test
+    fun `a scope paused in full makes no request until it resumes`() =
+        runBlocking<Unit> {
+            val scope = engine(workers).scope(scopeId)
+            scope.pause(SyncPause.ALL)
+            val collection = scope.collection(ledger)
+            collection.mutate {
+                adapter.bodies[wallet to walletId] = buildJsonObject { put("title", "Cash") }
+                markUpserted(wallet, walletId)
+            }
+            collection.requestSync()
+            delay(SETTLE_MILLIS)
+
+            // Every answer the fake would give is a failure, so a request of any kind would show up
+            // here as a cycle that started, a snapshot taken or a push sent.
+            assertTrue(logs.records.value.none { it.event == SyncLogEvent.CYCLE_STARTED })
+            assertEquals(0, snapshots)
+            assertTrue(transport.pushes.isEmpty())
+            assertEquals(SyncPhase.NEW, collection.state.value.phase)
+
+            transport.onSnapshot = { emptySnapshot() }
+            transport.onPush = ::applyingEverything
+            scope.resume()
+
+            collection.state.await("a live collection with its change sent") {
+                it.phase == SyncPhase.LIVE && it.pendingCount == 0
+            }
+        }
+
+    @Test
+    fun `a refusal the protocol does not name is retried, and resuming sends it without waiting`() =
+        runBlocking<Unit> {
+            val clock = TestClock()
+            transport.onSnapshot = { emptySnapshot() }
+            // What a host refusing uploads for reasons of its own answers with. The library has no
+            // case for it and must not guess one: it is a server error, retried with backoff, and
+            // nothing about the scope's access or the collection's data changes.
+            transport.onPush = { throw SyncTransportFailure.ServerError(PAYMENT_REQUIRED, "Payment Required") }
+            val scope = engine(workers, clock = clock).scope(scopeId)
+            val collection = scope.collection(ledger)
+            collection.mutate {
+                adapter.bodies[wallet to walletId] = buildJsonObject { put("title", "Cash") }
+                markUpserted(wallet, walletId)
+            }
+            awaitRecord("the scheduled retry") { it.event == SyncLogEvent.RETRY_SCHEDULED }
+
+            val refused = collection.diagnostics().queue.single()
+            assertEquals(PushGroupState.PENDING, refused.state)
+            assertEquals(1, refused.attempts)
+            assertNotNull(refused.nextRetryAt)
+            assertEquals(ScopeState.Online, scope.state.value)
+
+            // The application pauses on what it knows. Time is then turned back, so that the backoff
+            // can only end by being cleared: whatever delay was drawn, it now lies an hour away.
+            scope.pause(SyncPause.UPLOADS)
+            clock.instant = clock.instant - 1.hours
+            transport.onPush = ::applyingEverything
+
+            scope.resume()
+
+            collection.state.await("the group sent as soon as the pause was lifted") { it.pendingCount == 0 }
+        }
+
     private companion object {
         /** Incarnation the fake server answers from once the collection has been purged and re-created. */
         const val NEW_EPOCH_VALUE = "0199fd1a-0000-7000-8000-00000000000f"
@@ -1098,5 +1209,11 @@ class SyncEngineTest {
 
         /** How often a test looks at a counter it cannot observe as a flow. */
         const val POLL_MILLIS = 20L
+
+        /** How long a test waits to be sure that something it expects not to happen does not. */
+        const val SETTLE_MILLIS = 400L
+
+        /** Status a host answers with when it refuses a request for reasons of its own business. */
+        const val PAYMENT_REQUIRED = 402
     }
 }

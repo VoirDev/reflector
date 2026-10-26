@@ -715,9 +715,34 @@ the last one lands. It is the fallback rather than the default, and it is not bu
 it buys a stateful upload session, garbage collection of abandoned parts and a new failure
 surface — all of it to serve a group that no workload has yet produced.
 
-Retries: exponential backoff with jitter; `429`/`Retry-After` is respected; `5xx` and network
-errors are transient; `4xx` other than `401`/`403`/`409`/`410` is permanent and the group goes
-to `FAILED`.
+Retries: exponential backoff with jitter; `429`/`Retry-After` is respected. Network errors and
+every status the protocol does not name are transient: the group stays `PENDING` and waits, and
+the application sees `SyncFailure.Server` with the status. That includes a `4xx` a host answers
+for reasons of its own, such as `402` for an account it will not accept uploads from. A permanent
+refusal is never inferred from a status code. It arrives as a rejection in the push response, and
+only that sends a group to `FAILED`.
+
+**Pausing belongs to the application, and it is not a failure.** `ScopeHandle.pause` holds back
+either uploads (`SyncPause.UPLOADS`: the push queue and file uploads) or every request the scope's
+workers make (`SyncPause.ALL`), until `resume`. The library never pauses on its own and is never
+told why. A pause is a reason the application has for not syncing, and a status code it learned to
+read into that reason would make the library a party to the application's business.
+
+Work that is held back is not attempted, rather than attempted and refused. The worker checks the
+pause before each group and each file, so a group stays `PENDING` with its attempts, its backoff and
+its last error exactly as they were. Nothing is discarded and nothing is recorded as a failure.
+`resume` clears the backoff of the scope's pending groups and waiting files (`next_retry_at`, not
+the attempts) before it lifts the pause. A pause is commonly the application's answer to the
+refusals that produced that backoff, and making the user wait it out after the condition has
+changed would be the library second-guessing the application. The same goes for a `Retry-After`.
+
+The pause is kept in memory. Persisting it would make the library a second, unobservable copy of
+a decision whose source is the application, and one that outlived its reason would stall the
+queue silently, possibly forever. The application applies it again on start, before opening the
+first collection, which is what starts a worker. The pause is reported apart from `ScopeState`,
+because a scope with uploads paused is still online or offline, and can still need the user or be
+revoked. Those states are written by the workers as they learn them, and a pause folded into them
+would be overwritten by the first answer from the server.
 
 **Diagnostics leave through a port, like everything else that is the application's.** Every failure
 mode this library has is slow rather than loud — a queue that stops draining, conflicts nobody
@@ -826,7 +851,11 @@ interface SyncEngine {
 }
 
 interface ScopeHandle {
-    val state: StateFlow<ScopeState>           // Online | Offline | AuthRequired | Revoked
+    val state: StateFlow<ScopeState>           // Online | Offline | ServerUnreachable |
+                                               // AuthRequired | Revoked
+    val paused: StateFlow<SyncPause?>          // UPLOADS | ALL, or null; the application's, §9
+    fun pause(what: SyncPause = SyncPause.ALL)
+    suspend fun resume()                       // what was held back goes now, backoff cleared
     fun collection(id: CollectionId): CollectionHandle
 }
 

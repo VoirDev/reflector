@@ -1,5 +1,6 @@
 package dev.voir.reflector.sync.engine.blob
 
+import dev.voir.reflector.sync.core.SyncPause
 import dev.voir.reflector.sync.core.blob.BlobFailure
 import dev.voir.reflector.sync.core.blob.BlobStat
 import dev.voir.reflector.sync.core.blob.BlobStore
@@ -28,6 +29,7 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.launch
 import kotlin.time.Clock
@@ -56,6 +58,9 @@ import kotlin.time.Duration.Companion.minutes
  * @property log Sink for what was transferred and what failed, already bound to this collection.
  * @property coroutineScope Scope the loop runs in; cancelling it stops the worker.
  * @property clock Source of local time, for backoff only.
+ * @property paused What the application has paused in the scope. Uploads are held back under either
+ *   pause and downloads under [SyncPause.ALL]; a file held back is not attempted, so it keeps its
+ *   attempts and its backoff exactly as they were.
  * @property onProgressed Told when a file has got far enough for a record to follow it — registered,
  *   which is what a deferred reference waits for, and accepted, which is what a required one waits
  *   for. Nothing else would tell the push queue: it has no reason of its own to look again, so
@@ -77,6 +82,7 @@ internal class BlobWorker(
     private val log: SyncLogger,
     private val coroutineScope: CoroutineScope,
     private val clock: Clock,
+    private val paused: StateFlow<SyncPause?>,
     private val onProgressed: () -> Unit = {},
     private val backoff: BackoffPolicy = BackoffPolicy(),
     private val maxAttempts: Int = DEFAULT_MAX_ATTEMPTS,
@@ -155,6 +161,11 @@ internal class BlobWorker(
      */
     private suspend fun drain() {
         while (true) {
+            // No wake is scheduled: whatever is due will still be due when the pause is lifted, and
+            // lifting it asks for transfers.
+            if (paused.value == SyncPause.ALL) {
+                return
+            }
             val moved = uploadBatch() || downloadBatch()
             if (!moved) {
                 wakeWhenDue()
@@ -185,16 +196,26 @@ internal class BlobWorker(
     }
 
     /**
-     * Sends the next few files that are due.
+     * Sends the next few files that are due, unless uploads are paused.
      *
-     * @return `true` when there was anything to send, so that the caller looks again.
+     * @return `true` when there was anything to send, so that the caller looks again; `false` when
+     *   there was nothing, or uploads are paused.
      */
     private suspend fun uploadBatch(): Boolean {
+        if (paused.value != null) {
+            return false
+        }
         val waiting = waiting(BlobTransferState.LOCAL) + waiting(BlobTransferState.UPLOADING)
         if (waiting.isEmpty()) {
             return false
         }
-        waiting.take(CONCURRENCY).forEach { record -> upload(record) }
+        for (record in waiting.take(CONCURRENCY)) {
+            // Between files rather than once per batch, so a pause lands at the next file.
+            if (paused.value != null) {
+                break
+            }
+            upload(record)
+        }
         return true
     }
 
@@ -208,7 +229,12 @@ internal class BlobWorker(
         if (waiting.isEmpty()) {
             return false
         }
-        waiting.take(CONCURRENCY).forEach { record -> download(record) }
+        for (record in waiting.take(CONCURRENCY)) {
+            if (paused.value == SyncPause.ALL) {
+                break
+            }
+            download(record)
+        }
         return true
     }
 

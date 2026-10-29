@@ -49,6 +49,7 @@ import dev.voir.reflector.sync.protocol.push.RejectCode
 import dev.voir.reflector.sync.protocol.push.RejectError
 import dev.voir.reflector.sync.protocol.snapshot.SnapshotItem
 import dev.voir.reflector.sync.protocol.snapshot.SnapshotPage
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -143,6 +144,23 @@ class SyncEngineTest {
 
     /** Cycles the engine has reported finishing, which is how a test waits for one to happen. */
     private fun cyclesFinished(): Int = logs.records.value.count { it.event == SyncLogEvent.CYCLE_FINISHED }
+
+    /**
+     * Whether a cycle that began after [mark] has finished.
+     *
+     * Asked of start and finish together, because a finish alone may belong to a cycle that was
+     * already running at the mark and had done its work before it. Cycles of one collection run one
+     * at a time, so a finish reported after such a start is that cycle's or a later one's.
+     *
+     * @param mark Last record reported before the moment of interest, or `null` when there was none.
+     * @return `true` once a cycle begun after [mark] has reported finishing.
+     */
+    private fun cycleFinishedSince(mark: SyncLogRecord?): Boolean {
+        val records = logs.records.value
+        val since = records.drop(records.indexOfLast { it === mark } + 1)
+        val started = since.indexOfFirst { it.event == SyncLogEvent.CYCLE_STARTED }
+        return started >= 0 && since.drop(started + 1).any { it.event == SyncLogEvent.CYCLE_FINISHED }
+    }
 
     /**
      * Waits until the engine has reported a record matching [predicate].
@@ -1095,9 +1113,10 @@ class SyncEngineTest {
     fun `a scope paused for uploads keeps its queue as it was and goes on reading`() =
         runBlocking<Unit> {
             transport.onSnapshot = { emptySnapshot() }
-            var pulls = 0
+            // Counted on the worker's thread and read on this one.
+            val pulls = AtomicInteger()
             transport.onChanges = {
-                pulls++
+                pulls.incrementAndGet()
                 ChangesPage(emptyList(), nextCursor = null, hasMore = false, epoch = TEST_EPOCH)
             }
             val scope = engine(workers).scope(scopeId)
@@ -1106,17 +1125,20 @@ class SyncEngineTest {
             scope.pause(SyncPause.UPLOADS)
             val collection = scope.collection(ledger)
             collection.state.await("a live collection") { it.phase == SyncPhase.LIVE }
-            val pullsBefore = pulls
-            val cyclesBefore = cyclesFinished()
+            val pullsBefore = pulls.get()
+            // A cycle begun after this point rather than any cycle finishing: the one that made the
+            // collection live may still be running here, having pulled already, and its finishing is
+            // no evidence of a later pull.
+            val mark = logs.records.value.lastOrNull()
 
             collection.mutate {
                 adapter.bodies[wallet to walletId] = buildJsonObject { put("title", "Cash") }
                 markUpserted(wallet, walletId)
             }
-            awaitRecords("a cycle after the change") { cyclesFinished() > cyclesBefore }
+            awaitRecords("a cycle begun after the change") { cycleFinishedSince(mark) }
 
             assertTrue(transport.pushes.isEmpty(), "nothing may leave while uploads are paused")
-            assertTrue(pulls > pullsBefore, "reading the log is not what was paused")
+            assertTrue(pulls.get() > pullsBefore, "reading the log is not what was paused")
             // Not sent is not failed: no attempt, no backoff, nothing for the application to see.
             val head = collection.diagnostics().queue.single()
             assertEquals(PushGroupState.PENDING, head.state)

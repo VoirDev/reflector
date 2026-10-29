@@ -563,8 +563,9 @@ internal class PushCoordinator(
      *
      * A reference to a file that was never registered is left out rather than sent: the server would
      * refuse the whole group for it, and there is nothing on the server for the reference to protect
-     * anyway. The local reference stays, so the application is still told about the file and can
-     * still withdraw it.
+     * anyway. A file the server refused is left out for the same reason — it may never have been
+     * registered, and one that was will never be usable. The local reference stays, so the
+     * application is still told about the file and can still withdraw it.
      *
      * @param record Record whose document is being sent.
      * @return Identifiers to put on the operation, or `null` when this client tracks no files.
@@ -578,7 +579,7 @@ internal class PushCoordinator(
         val declared = references.declare(record.entityType, record.entityId, document, generation)
         return declared.filter { blobId ->
             val state = stores.blobs.find(scope, collection, blobId)?.state
-            state != null && state != BlobTransferState.LOCAL && state != BlobTransferState.UNAVAILABLE
+            state != null && state !in UNDECLARED_BLOB_STATES
         }
     }
 
@@ -968,5 +969,12 @@ internal class PushCoordinator(
          * group and retry forever.
          */
         const val DEFAULT_MAX_DEPENDENCY_MERGES = 8
+
+        /**
+         * States of a file a push leaves off its operation: not registered yet, given up on, or
+         * refused — none of them anything the server can hold a reference to.
+         */
+        val UNDECLARED_BLOB_STATES =
+            setOf(BlobTransferState.LOCAL, BlobTransferState.UNAVAILABLE, BlobTransferState.REFUSED)
     }
 }

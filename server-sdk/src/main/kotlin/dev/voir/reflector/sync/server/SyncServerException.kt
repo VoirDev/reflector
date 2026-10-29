@@ -4,6 +4,7 @@ import dev.voir.reflector.sync.protocol.BlobId
 import dev.voir.reflector.sync.protocol.CollectionEpoch
 import dev.voir.reflector.sync.protocol.CollectionId
 import dev.voir.reflector.sync.protocol.Cursor
+import dev.voir.reflector.sync.protocol.blob.BlobContentType
 
 /**
  * Failure the host has to translate into its transport.
@@ -110,8 +111,9 @@ public sealed class SyncServerException(
     /**
      * The declared size exceeds the limit the deployment publishes.
      *
-     * The host answers `413`. Refused at registration, before a ticket exists, because the point of
-     * publishing the limit is that nobody pays to transfer a file that was never going to be kept.
+     * The host answers `409` with [toBlobRefusal]'s body. Refused at registration, before a ticket
+     * exists, because the point of publishing the limit is that nobody pays to transfer a file that
+     * was never going to be kept.
      *
      * @property collection Collection the client addressed.
      * @property blobId Blob the client tried to register.
@@ -126,6 +128,41 @@ public sealed class SyncServerException(
     ) : SyncServerException(
             "blob ${blobId.value} of collection ${collection.value} declares $size octets, over the limit of $limit",
         )
+
+    /**
+     * The declared media type is not one the deployment's [BlobTypePolicy] accepts.
+     *
+     * The host answers `409` with [toBlobRefusal]'s body. Refused at registration, before a ticket
+     * exists, for the same reason as [BlobTooLargeException].
+     *
+     * @property collection Collection the client addressed.
+     * @property blobId Blob the client tried to register.
+     * @property contentType Media type the client declared.
+     */
+    public class BlobUnsupportedTypeException(
+        public val collection: CollectionId,
+        public val blobId: BlobId,
+        public val contentType: BlobContentType,
+    ) : SyncServerException(
+            "blob ${blobId.value} of collection ${collection.value} declares ${contentType.value}, which is not accepted",
+        )
+
+    /**
+     * The bytes arrived and the host's storage port rejected them.
+     *
+     * The host answers `409` with [toBlobRefusal]'s body. Unlike [BlobNotStoredException] this is
+     * final: the bytes are the ones the client meant to send, and sending them again would be refused
+     * again.
+     *
+     * @property collection Collection the client addressed.
+     * @property blobId Blob whose bytes were rejected.
+     * @property reason What the host found, as its storage port reported it.
+     */
+    public class BlobRejectedException(
+        public val collection: CollectionId,
+        public val blobId: BlobId,
+        public val reason: String,
+    ) : SyncServerException("blob ${blobId.value} of collection ${collection.value} was rejected: $reason")
 }
 
 /** Shorthand for [SyncServerException.CursorTooOldException]. */
@@ -148,3 +185,9 @@ public typealias BlobNotStoredException = SyncServerException.BlobNotStoredExcep
 
 /** Shorthand for [SyncServerException.BlobTooLargeException]. */
 public typealias BlobTooLargeException = SyncServerException.BlobTooLargeException
+
+/** Shorthand for [SyncServerException.BlobUnsupportedTypeException]. */
+public typealias BlobUnsupportedTypeException = SyncServerException.BlobUnsupportedTypeException
+
+/** Shorthand for [SyncServerException.BlobRejectedException]. */
+public typealias BlobRejectedException = SyncServerException.BlobRejectedException

@@ -13,8 +13,10 @@ import dev.voir.reflector.sync.server.BlobConflictException
 import dev.voir.reflector.sync.server.BlobListener
 import dev.voir.reflector.sync.server.BlobNotStoredException
 import dev.voir.reflector.sync.server.BlobRefusalReason
+import dev.voir.reflector.sync.server.BlobRejectedException
 import dev.voir.reflector.sync.server.BlobStorage
 import dev.voir.reflector.sync.server.BlobTooLargeException
+import dev.voir.reflector.sync.server.BlobUnsupportedTypeException
 import dev.voir.reflector.sync.server.BlobVerification
 import dev.voir.reflector.sync.server.StoredBlob
 import dev.voir.reflector.sync.server.SyncBlobService
@@ -77,6 +79,15 @@ internal class PostgresSyncBlobService(
                 context = { mapOf("blob" to descriptor.blobId.value.toString(), "size" to descriptor.size.toString()) },
             ) { "the blob was refused before a ticket was issued: it declares more than the published limit" }
             throw BlobTooLargeException(collection, descriptor.blobId, descriptor.size, blobConfig.maxBlobBytes)
+        }
+        if (!blobConfig.typePolicy.accepts(descriptor.contentType)) {
+            logger.warn(
+                SyncLogEvent.BLOB_REFUSED,
+                context = {
+                    mapOf("blob" to descriptor.blobId.value.toString(), "contentType" to descriptor.contentType.value)
+                },
+            ) { "the blob was refused before a ticket was issued: the host does not accept its declared type" }
+            throw BlobUnsupportedTypeException(collection, descriptor.blobId, descriptor.contentType)
         }
 
         // Asked before the module knows whether it will need the answer, which is why the port
@@ -242,11 +253,15 @@ internal class PostgresSyncBlobService(
      * A checksum the storage does not report is not a disagreement. It means the storage cannot
      * answer, which is true of plenty of them, and the size comparison still applies.
      *
+     * A rejection is the host's judgement of bytes that did arrive as declared, and it is final
+     * where the other two are not: the client is told so, and does not send the same bytes again.
+     *
      * @param scope Scope the blob belongs to.
      * @param collection Collection the blob belongs to.
      * @param stored Blob whose object is being checked.
      * @param logger Logger already bound to this collection.
      * @throws BlobNotStoredException When the object is missing or disagrees.
+     * @throws BlobRejectedException When the host's storage port rejected the object.
      */
     private fun verify(
         scope: ScopeId,
@@ -258,6 +273,15 @@ internal class PostgresSyncBlobService(
             when (val verification = storage.verify(scope, collection, stored)) {
                 BlobVerification.Absent -> {
                     BlobRefusalReason.ABSENT to "the storage holds no object for it"
+                }
+
+                is BlobVerification.Rejected -> {
+                    logger.warn(
+                        SyncLogEvent.BLOB_REFUSED,
+                        context = { blobContext(stored) + ("reason" to verification.reason) },
+                    ) { "the blob's bytes arrived and the host rejected them" }
+                    metrics.emit(SyncMetricEvent.BlobRefused(scope, collection, BlobRefusalReason.REJECTED), logger)
+                    throw BlobRejectedException(collection, stored.blobId, verification.reason)
                 }
 
                 is BlobVerification.Stored -> {

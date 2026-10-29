@@ -9,9 +9,11 @@ import dev.voir.reflector.sync.core.transport.SyncTransportFailure
 import dev.voir.reflector.sync.protocol.BlobId
 import dev.voir.reflector.sync.protocol.CollectionId
 import dev.voir.reflector.sync.protocol.ScopeId
+import dev.voir.reflector.sync.protocol.SyncProtocolJson
 import dev.voir.reflector.sync.protocol.blob.BlobDescriptor
 import dev.voir.reflector.sync.protocol.blob.BlobDownload
 import dev.voir.reflector.sync.protocol.blob.BlobInfo
+import dev.voir.reflector.sync.protocol.blob.BlobRefusal
 import dev.voir.reflector.sync.protocol.blob.BlobRegistration
 import dev.voir.reflector.sync.protocol.blob.BlobTicket
 import dev.voir.reflector.sync.protocol.blob.BlobTicketMethod
@@ -25,6 +27,7 @@ import io.ktor.client.request.prepareRequest
 import io.ktor.client.request.setBody
 import io.ktor.client.statement.HttpResponse
 import io.ktor.client.statement.bodyAsChannel
+import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpMethod
@@ -78,19 +81,59 @@ public class KtorBlobTransport(
      * Reads the two statuses that mean something different here than anywhere else.
      *
      * `404` is a file the server does not have, and `409` is a file it refuses — an identifier that
-     * already names different bytes, or a claim that an upload finished which the storage did not
-     * bear out. On every other path of this protocol `409` means a purged collection, and letting a
-     * failed upload through that mapping would wipe the collection it belongs to.
+     * already names different bytes, a claim that an upload finished which the storage did not bear
+     * out, or a file it will not keep at all. On every other path of this protocol `409` means a
+     * purged collection, and letting a failed upload through that mapping would wipe the collection
+     * it belongs to.
      *
      * @param response Answer from the server.
      * @return Failure to raise, or `null` to let the shared mapping decide.
      */
-    private fun interpret(response: HttpResponse): SyncTransportFailure? =
+    private suspend fun interpret(response: HttpResponse): SyncTransportFailure? =
         when (response.status) {
-            HttpStatusCode.NotFound -> SyncTransportFailure.BlobGone("the server has no such file")
-            HttpStatusCode.Conflict -> SyncTransportFailure.BlobRefused("the server refused the file")
-            else -> null
+            HttpStatusCode.NotFound -> {
+                SyncTransportFailure.BlobGone("the server has no such file")
+            }
+
+            HttpStatusCode.Conflict -> {
+                val refusal = refusalOf(response)
+                SyncTransportFailure.BlobRefused(
+                    message = refusal?.message?.takeIf(String::isNotBlank) ?: "the server refused the file",
+                    code = refusal?.code,
+                )
+            }
+
+            else -> {
+                null
+            }
         }
+
+    /**
+     * Reads why the server refused a file, when it said.
+     *
+     * Lenient on purpose. A host that predates refusal codes answers `409` with a body of its own, and
+     * that has to arrive as a refusal without a code — which the engine treats exactly as it treated
+     * every refusal before codes existed — rather than as a failure to understand the server.
+     *
+     * @param response A `409` from a blob path.
+     * @return The refusal, or `null` when the body is not one or could not be read.
+     */
+    private suspend fun refusalOf(response: HttpResponse): BlobRefusal? {
+        val body =
+            try {
+                response.bodyAsText()
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (_: Exception) {
+                return null
+            }
+        return try {
+            SyncProtocolJson.format.decodeFromString(BlobRefusal.serializer(), body)
+        } catch (_: IllegalArgumentException) {
+            // `SerializationException` is one of these, and so is a body that is not JSON at all.
+            null
+        }
+    }
 
     override suspend fun register(
         scope: ScopeId,

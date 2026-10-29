@@ -20,7 +20,8 @@ import kotlin.time.Instant
  * hands out permission to move bytes and is told afterwards what arrived — so writing real files
  * here would exercise the test's own I/O and none of the module's behaviour. What the module
  * actually depends on is the four answers this gives, and those are what a test needs to control:
- * an object that is there, one that is not, and one that is there and wrong.
+ * an object that is there, one that is not, one that is there and wrong, and one the host will not
+ * keep.
  *
  * @property tickets Every ticket handed out, so that a test can assert what a client would have
  *   been told to do.
@@ -28,6 +29,9 @@ import kotlin.time.Instant
 class FakeBlobStorage : BlobStorage {
     /** What the bucket holds, by key. */
     private val objects = mutableMapOf<BlobStorageKey, BlobVerification.Stored>()
+
+    /** Objects this host inspected and will not keep, by key, with what it found. */
+    private val rejections = mutableMapOf<BlobStorageKey, String>()
 
     /** Keys this host's policy keeps rather than deletes, so that both policies can be exercised. */
     var retained: Set<BlobStorageKey> = emptySet()
@@ -51,6 +55,19 @@ class FakeBlobStorage : BlobStorage {
         checksum: BlobChecksum? = null,
     ) {
         objects[key] = BlobVerification.Stored(size, checksum)
+    }
+
+    /**
+     * Pretends a device wrote an object whose content this host will not keep.
+     *
+     * @param key Key the object was written under.
+     * @param reason What the host's inspection found.
+     */
+    fun reject(
+        key: BlobStorageKey,
+        reason: String,
+    ) {
+        rejections[key] = reason
     }
 
     /**
@@ -89,7 +106,10 @@ class FakeBlobStorage : BlobStorage {
         scope: ScopeId,
         collection: CollectionId,
         blob: StoredBlob,
-    ): BlobVerification = objects[blob.storageKey] ?: BlobVerification.Absent
+    ): BlobVerification =
+        rejections[blob.storageKey]?.let(BlobVerification::Rejected)
+            ?: objects[blob.storageKey]
+            ?: BlobVerification.Absent
 
     override fun onReleased(
         scope: ScopeId,

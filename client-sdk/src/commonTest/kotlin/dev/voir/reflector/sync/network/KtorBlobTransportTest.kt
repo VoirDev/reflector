@@ -8,6 +8,7 @@ import dev.voir.reflector.sync.protocol.CollectionId
 import dev.voir.reflector.sync.protocol.ScopeId
 import dev.voir.reflector.sync.protocol.blob.BlobContentType
 import dev.voir.reflector.sync.protocol.blob.BlobDescriptor
+import dev.voir.reflector.sync.protocol.blob.BlobRefusalCode
 import dev.voir.reflector.sync.protocol.blob.BlobTicket
 import dev.voir.reflector.sync.protocol.blob.BlobTicketMethod
 import io.ktor.client.engine.mergeHeaders
@@ -221,6 +222,42 @@ class KtorBlobTransportTest {
             assertFailsWith<SyncTransportFailure.BlobGone> {
                 transport.download(ticket(BlobTicketMethod.GET), Buffer())
             }
+        }
+
+    @Test
+    fun `a refused file carries the reason the server gave`() =
+        runTest {
+            val transport =
+                transport {
+                    respond(
+                        """{"code":"UNSUPPORTED_TYPE","message":"application/zip is not accepted"}""",
+                        HttpStatusCode.Conflict,
+                        headersOf(HttpHeaders.ContentType, "application/json"),
+                    )
+                }
+
+            val failure =
+                assertFailsWith<SyncTransportFailure.BlobRefused> {
+                    transport.register(scope, collection, BlobDescriptor(blobId, BlobContentType("application/zip"), 4))
+                }
+
+            assertEquals(BlobRefusalCode.UNSUPPORTED_TYPE, failure.code)
+            assertEquals("application/zip is not accepted", failure.message)
+        }
+
+    @Test
+    fun `a refusal from a host that sends no reason is still a refusal rather than a reset`() =
+        runTest {
+            val transport = transport { respond("blob was not accepted", HttpStatusCode.Conflict) }
+
+            val failure =
+                assertFailsWith<SyncTransportFailure.BlobRefused> {
+                    transport.complete(scope, collection, blobId)
+                }
+
+            // No code is what an older host sends, and the engine treats it as every refusal was
+            // treated before codes existed. What it must never be is the purged-collection answer.
+            assertNull(failure.code)
         }
 
     private fun stat() =BlobStat(size = BYTES.size.toLong(), contentType = BlobContentType("image/jpeg"))

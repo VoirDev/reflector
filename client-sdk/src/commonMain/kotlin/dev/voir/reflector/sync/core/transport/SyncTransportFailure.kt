@@ -1,5 +1,6 @@
 package dev.voir.reflector.sync.core.transport
 
+import dev.voir.reflector.sync.protocol.blob.BlobRefusalCode
 import kotlin.time.Duration
 
 /**
@@ -108,15 +109,19 @@ public sealed class SyncTransportFailure(
     /**
      * The server refused something about a file rather than about the request.
      *
-     * A blob path only: an identifier already naming different bytes, or a claim that an upload
-     * finished which the storage did not bear out. Both arrive as `409`, which on every other path
-     * of this protocol means a purged collection — so they must not go through the same mapping, or
-     * a failed upload would wipe the collection it belongs to.
+     * A blob path only: an identifier already naming different bytes, a claim that an upload
+     * finished which the storage did not bear out, or a file the server will not keep at all —
+     * too large, of a type it does not accept, or with content it rejected. All arrive as `409`,
+     * which on every other path of this protocol means a purged collection — so they must not go
+     * through the same mapping, or a failed upload would wipe the collection it belongs to.
      *
      * @property message Description reported by the server.
+     * @property code Why, as the server's refusal body says, or `null` when the server sent none —
+     *   which is what a host that predates refusal codes does.
      */
     public class BlobRefused(
         message: String,
+        public val code: BlobRefusalCode? = null,
     ) : SyncTransportFailure(message)
 
     /**

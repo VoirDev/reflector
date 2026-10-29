@@ -31,4 +31,22 @@ public sealed class BlobVerification {
      * it uploaded is not enough on its own.
      */
     public data object Absent : BlobVerification()
+
+    /**
+     * The object is there and the host will not keep it.
+     *
+     * The one judgement a host makes here, because it is the one only the host can make: whether the
+     * bytes are what it is willing to serve — usually whether they are what the declared media type
+     * says they are. The module refuses the blob for good; the client is told not to send it again.
+     *
+     * The object is left where it is. The blob stays registered and unusable, so nothing will ever
+     * serve it, and it is collected like any other blob once no document references it. A client
+     * that registers the same identifier with different bytes overwrites it.
+     *
+     * @property reason What the host found, for its logs. It reaches the client as the refusal's
+     *   message, so it must name nothing a client should not see.
+     */
+    public data class Rejected(
+        public val reason: String,
+    ) : BlobVerification()
 }

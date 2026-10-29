@@ -36,4 +36,17 @@ public enum class BlobTransferState {
      * a way to attach the file again.
      */
     UNAVAILABLE,
+
+    /**
+     * The bytes are on this device and the server will not take them.
+     *
+     * Too large for the limit it publishes, of a type it does not accept, or with content it
+     * rejected once it had them. Separate from [UNAVAILABLE] because the two ask a user different
+     * things: an unavailable file may come back on a better connection or from another device, and
+     * a refused one will be refused again however often it is sent. Nothing retries it on its own;
+     * [dev.voir.reflector.sync.core.CollectionHandle.retry] sends it again, for a server whose rules
+     * have changed. The reason reaches [BlobStore.onFailed] as [BlobFailure.Refused] or
+     * [BlobFailure.TooLarge].
+     */
+    REFUSED,
 }

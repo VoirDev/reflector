@@ -28,6 +28,12 @@ The three file endpoints are served only by a deployment that configures storage
 publishes no file limits, and a client configured for files learns that at start-up rather than on a
 user's first attachment.
 
+On the file endpoints `404` is a file the server does not have and `409` is a file it refuses, with a
+`BlobRefusal` body — `{"code": "UNSUPPORTED_TYPE", "message": "…"}` — saying whether sending it again
+could help. The server module writes that body (`SyncServerException.toBlobRefusal()`); the codes are
+in the [file specification](sync-files-design.md). Neither status means here what it means in the
+table below.
+
 ## Status codes
 
 The codes are the client's recovery instructions, so the host must keep them distinguishable:

@@ -20,6 +20,7 @@ import dev.voir.reflector.sync.protocol.BlobId
 import dev.voir.reflector.sync.protocol.CollectionId
 import dev.voir.reflector.sync.protocol.ScopeId
 import dev.voir.reflector.sync.protocol.blob.BlobDescriptor
+import dev.voir.reflector.sync.protocol.blob.BlobRefusalCode
 import dev.voir.reflector.sync.protocol.blob.BlobState
 import dev.voir.reflector.sync.protocol.config.BlobLimits
 import kotlinx.coroutines.CoroutineScope
@@ -63,9 +64,9 @@ import kotlin.time.Duration.Companion.minutes
  *   attempts and its backoff exactly as they were.
  * @property onProgressed Told when a file has got far enough for a record to follow it — registered,
  *   which is what a deferred reference waits for, and accepted, which is what a required one waits
- *   for. Nothing else would tell the push queue: it has no reason of its own to look again, so
- *   without this a record would sit until the next timer, which on a device nobody touches is
- *   however long that is.
+ *   for — and when a file is given up on, which a deferred reference stops waiting for. Nothing else
+ *   would tell the push queue: it has no reason of its own to look again, so without this a record
+ *   would sit until the next timer, which on a device nobody touches is however long that is.
  * @property backoff Delay policy for transfers that failed.
  * @property maxAttempts Failed attempts before a download is given up on, and after which an upload
  *   that keeps failing is reported.
@@ -321,9 +322,16 @@ internal class BlobWorker(
             )
             onProgressed()
         } catch (failure: SyncTransportFailure.BlobRefused) {
-            // The server refuses the file itself — its identifier names other bytes, or it is over
-            // the ceiling. Sending the same bytes again cannot change that answer.
-            retryOrGiveUp(record, failure)
+            val code = failure.code
+            if (code == null || code in RETRIED_REFUSALS) {
+                // Its identifier names other bytes, or the storage did not bear out the upload: tried
+                // again within the bounded attempts, as every refusal was before codes existed.
+                retryOrGiveUp(record, failure)
+            } else {
+                // The server will not keep these bytes. Sending them again cannot change that answer,
+                // and every attempt would cost the owner the whole file on their mobile data.
+                giveUp(record.blobId, BlobFailure.Refused(code, failure.message ?: "the server refused the file"))
+            }
         } catch (failure: SyncTransportFailure) {
             // Never given up on while the bytes are here. The record naming this file has been on
             // every other device since registration, and those devices can do nothing but wait for
@@ -544,6 +552,10 @@ internal class BlobWorker(
      * application's document on its own judgement, and a receipt that failed to upload may well be
      * worth asking a user about rather than silently forgetting.
      *
+     * A file the server refused is left [BlobTransferState.REFUSED] rather than
+     * [BlobTransferState.UNAVAILABLE]: its bytes are here and could be sent, and the state is what
+     * keeps them from being sent again by [resumeGivenUpUploads].
+     *
      * @param blobId File being given up on.
      * @param failure Why.
      */
@@ -551,9 +563,17 @@ internal class BlobWorker(
         blobId: BlobId,
         failure: BlobFailure,
     ) {
+        val state =
+            when (failure) {
+                is BlobFailure.TooLarge, is BlobFailure.Refused -> BlobTransferState.REFUSED
+                is BlobFailure.SourceMissing, is BlobFailure.Gone, is BlobFailure.Exhausted -> BlobTransferState.UNAVAILABLE
+            }
         transactions.transaction {
-            stores.blobs.setState(scope, collection, blobId, BlobTransferState.UNAVAILABLE)
+            stores.blobs.setState(scope, collection, blobId, state)
         }
+        // A record that was waiting for this file to be registered never will be now, and goes out
+        // without it; the queue has no other reason to look again.
+        onProgressed()
         log.warn(
             SyncLogEvent.BLOB_UNAVAILABLE,
             context = { mapOf("blob" to blobId.value.toString(), "reason" to failure::class.simpleName.orEmpty()) },
@@ -594,5 +614,14 @@ internal class BlobWorker(
 
         /** How long to wait before asking again for a file another device is still sending. */
         val NOT_READY_DELAY = 1.minutes
+
+        /**
+         * Refusals that are tried again within the bounded attempts rather than given up on at once.
+         *
+         * The two that are not about the file: an identifier clash, and an upload the storage did not
+         * bear out. Every other code — including one this library has never heard of — says the
+         * server will not keep the bytes.
+         */
+        val RETRIED_REFUSALS = setOf(BlobRefusalCode.CONFLICT, BlobRefusalCode.NOT_STORED)
     }
 }

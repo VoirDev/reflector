@@ -13,7 +13,9 @@ import dev.voir.reflector.sync.server.BlobStorageKey
 import dev.voir.reflector.sync.server.CollectionResetException
 import dev.voir.reflector.sync.server.CursorTooOldException
 import dev.voir.reflector.sync.server.SyncServerException
+import dev.voir.reflector.sync.server.UnknownBlobException
 import dev.voir.reflector.sync.server.UnknownCollectionException
+import dev.voir.reflector.sync.server.toBlobRefusal
 import dev.voir.reflector.sync.server.postgres.SyncModule
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
@@ -157,6 +159,9 @@ fun Application.syncEndpoints(
  * makes a client discard it, unsent changes included. Collapsing them would cost the client its
  * recoveries — and collapsing the last two would either lose a user's offline edits after an
  * ordinary retention gap, or put an erased collection back after a purge.
+ *
+ * On a blob route `404` and `409` mean something else, and the client reads them there itself: a file
+ * the server does not have, and a file it refused, with the reason in the body.
  */
 private suspend fun RoutingContext.withScope(
     authorizer: ScopeAuthorizer,
@@ -193,8 +198,17 @@ private suspend fun RoutingContext.withScope(
         call.respond(HttpStatusCode.Conflict, failure.message.orEmpty())
     } catch (failure: UnknownCollectionException) {
         call.respond(HttpStatusCode.NotFound, failure.message.orEmpty())
+    } catch (failure: UnknownBlobException) {
+        call.respond(HttpStatusCode.NotFound, failure.message.orEmpty())
     } catch (failure: SyncServerException) {
-        call.respond(HttpStatusCode.BadRequest, failure.message.orEmpty())
+        // A refused file is a `409` with the reason in the body, which only a blob route can raise:
+        // on the document routes `409` is the purged collection answered above.
+        val refusal = failure.toBlobRefusal()
+        if (refusal != null) {
+            call.respond(HttpStatusCode.Conflict, refusal)
+        } else {
+            call.respond(HttpStatusCode.BadRequest, failure.message.orEmpty())
+        }
     } catch (failure: IllegalArgumentException) {
         // A malformed cursor or page token is the client's problem to fix, not a server fault.
         call.respond(HttpStatusCode.BadRequest, failure.message.orEmpty())

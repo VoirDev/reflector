@@ -26,11 +26,13 @@ import dev.voir.reflector.sync.protocol.EntityVersion
 import dev.voir.reflector.sync.protocol.ScopeId
 import dev.voir.reflector.sync.protocol.blob.BlobContentType
 import dev.voir.reflector.sync.protocol.blob.BlobInfo
+import dev.voir.reflector.sync.protocol.blob.BlobRefusalCode
 import dev.voir.reflector.sync.protocol.blob.BlobState
 import dev.voir.reflector.sync.protocol.config.BlobLimits
 import dev.voir.reflector.sync.protocol.config.SyncLimits
 import dev.voir.reflector.sync.protocol.push.AppliedVersion
 import dev.voir.reflector.sync.protocol.push.PushGroupResult
+import dev.voir.reflector.sync.protocol.push.PushOperation
 import dev.voir.reflector.sync.protocol.push.PushResponse
 import dev.voir.reflector.sync.protocol.snapshot.SnapshotPage
 import kotlinx.coroutines.CoroutineScope
@@ -295,12 +297,72 @@ class BlobWorkerTest {
         runBlocking<Unit> {
             attach(size = MAX_BYTES + 1)
 
-            await("the file being given up on") { stateOf(photo) == BlobTransferState.UNAVAILABLE }
+            await("the file being refused") { stateOf(photo) == BlobTransferState.REFUSED }
             // The point of publishing a limit is that nobody pays to transfer a file that was never
             // going to be kept, so nothing may have been registered or sent.
             assertTrue(blobs.registered.isEmpty())
             val failure = assertIs<BlobFailure.TooLarge>(files.failures.single().second)
             assertEquals(MAX_BYTES, failure.limit)
+        }
+
+    @Test
+    fun `a file the server will not keep is refused at once rather than retried`() =
+        runBlocking<Unit> {
+            blobs.failWith =
+                SyncTransportFailure.BlobRefused("image/jpeg is not accepted", BlobRefusalCode.UNSUPPORTED_TYPE)
+            attach()
+
+            await("the file being refused") { stateOf(photo) == BlobTransferState.REFUSED }
+            // Every attempt would cost the owner the whole file on their mobile data and be refused
+            // again, so there is no second one and the application hears the reason straight away.
+            assertEquals(0, recordOf(photo)?.attempts)
+            val failure = assertIs<BlobFailure.Refused>(files.failures.single().second)
+            assertEquals(BlobRefusalCode.UNSUPPORTED_TYPE, failure.code)
+        }
+
+    @Test
+    fun `a record naming a refused file goes out without it`() =
+        runBlocking<Unit> {
+            blobs.failWith =
+                SyncTransportFailure.BlobRefused("the bytes are not a JPEG", BlobRefusalCode.CONTENT_REJECTED)
+            attach()
+
+            await("the file being refused") { stateOf(photo) == BlobTransferState.REFUSED }
+            await("the record going out") { transport.pushes.isNotEmpty() }
+            // Declaring it would have the server refuse the whole group for a file it never kept; the
+            // local reference stays, so the application can still withdraw it.
+            val declared = transport.pushes.last().groups.single().ops.single() as PushOperation.Upsert
+            assertEquals(emptyList(), declared.blobs)
+            assertEquals(
+                listOf(photo),
+                transactions.transaction { stores.blobRefs.of(scopeId, ledger, wallet, walletId) }.map { it.id },
+            )
+        }
+
+    @Test
+    fun `a refusal a retry can fix is retried like any failed transfer`() =
+        runBlocking<Unit> {
+            blobs.failWith =
+                SyncTransportFailure.BlobRefused("the storage holds no object", BlobRefusalCode.NOT_STORED)
+            attach()
+
+            await("the failure being recorded") { (recordOf(photo)?.attempts ?: 0) > 0 }
+            assertEquals(BlobTransferState.LOCAL, stateOf(photo))
+            assertTrue(files.failures.isEmpty())
+        }
+
+    @Test
+    fun `asking to try again sends a refused file once more`() =
+        runBlocking<Unit> {
+            blobs.failWith = SyncTransportFailure.BlobRefused("too large", BlobRefusalCode.TOO_LARGE)
+            attach()
+            await("the file being refused") { stateOf(photo) == BlobTransferState.REFUSED }
+            // A server whose rules changed is the one case in which the same bytes get a new answer.
+            blobs.failWith = null
+
+            collection().retry(photo)
+
+            await("the file reaching the server") { stateOf(photo) == BlobTransferState.UPLOADED }
         }
 
     @Test

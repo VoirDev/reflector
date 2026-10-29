@@ -171,6 +171,47 @@ class BlobReferenceTest {
         assertEquals(RejectCode.TOO_LARGE, rejected.error.code)
     }
 
+    @Test
+    fun `a document stored under a higher limit can still be written as it is`() {
+        val stored = List(MAX_PER_ENTITY + 2) { registered() }
+        pushUnderEarlierLimit(group(upsert(1, blobs = stored)))
+
+        // An edit that touches nothing but the record: refusing it would make an old record
+        // impossible to change, and on a device a refused group stops the whole queue behind it.
+        val unchanged = push(group(upsert(1, base = EntityVersion("1"), blobs = stored)))
+        val shrunk = push(group(upsert(1, base = EntityVersion("2"), blobs = stored.drop(1))))
+
+        assertIs<PushGroupResult.Applied>(unchanged.results.single())
+        assertIs<PushGroupResult.Applied>(shrunk.results.single())
+        assertEquals(stored.drop(1).sortedBy { it.value }, referencesOf(1).sortedBy { it.value })
+    }
+
+    @Test
+    fun `a document stored under a higher limit may not grow`() {
+        val stored = List(MAX_PER_ENTITY + 1) { registered() }
+        pushUnderEarlierLimit(group(upsert(1, blobs = stored)))
+
+        val result = push(group(upsert(1, base = EntityVersion("1"), blobs = stored + registered())))
+
+        val rejected = assertIs<PushGroupResult.Rejected>(result.results.single())
+        assertEquals(RejectCode.TOO_LARGE, rejected.error.code)
+    }
+
+    /**
+     * Pushes a group through a deployment whose reference limit was higher, as the same database's
+     * earlier configuration would have.
+     */
+    private fun pushUnderEarlierLimit(group: PushGroup) {
+        val earlier =
+            PostgresFixture.module(
+                clock = clock,
+                blobs = BlobConfig(maxBlobsPerEntity = MAX_PER_ENTITY * 4),
+                blobStorage = storage,
+            )
+        val result = earlier.service.push(scope, ledger, PushRequest(client, listOf(group)))
+        assertIs<PushGroupResult.Applied>(result.results.single())
+    }
+
     private fun registered(accept: Boolean = true): BlobId {
         val descriptor =
             BlobDescriptor(

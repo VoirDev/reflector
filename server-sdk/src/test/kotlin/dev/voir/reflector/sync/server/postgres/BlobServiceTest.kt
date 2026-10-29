@@ -6,16 +6,21 @@ import dev.voir.reflector.sync.protocol.ScopeId
 import dev.voir.reflector.sync.protocol.blob.BlobChecksum
 import dev.voir.reflector.sync.protocol.blob.BlobContentType
 import dev.voir.reflector.sync.protocol.blob.BlobDescriptor
+import dev.voir.reflector.sync.protocol.blob.BlobRefusalCode
 import dev.voir.reflector.sync.protocol.blob.BlobState
 import dev.voir.reflector.sync.protocol.blob.BlobTicketMethod
 import dev.voir.reflector.sync.server.BlobConfig
 import dev.voir.reflector.sync.server.BlobConflictException
 import dev.voir.reflector.sync.server.BlobListener
 import dev.voir.reflector.sync.server.BlobNotStoredException
+import dev.voir.reflector.sync.server.BlobRejectedException
 import dev.voir.reflector.sync.server.BlobTooLargeException
+import dev.voir.reflector.sync.server.BlobTypePolicy
+import dev.voir.reflector.sync.server.BlobUnsupportedTypeException
 import dev.voir.reflector.sync.server.StoredBlob
 import dev.voir.reflector.sync.server.SyncBlobService
 import dev.voir.reflector.sync.server.UnknownBlobException
+import dev.voir.reflector.sync.server.toBlobRefusal
 import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -46,7 +51,11 @@ class BlobServiceTest {
             PostgresFixture
                 .module(
                     clock = clock,
-                    blobs = BlobConfig(maxBlobBytes = MAX_BLOB_BYTES),
+                    blobs =
+                        BlobConfig(
+                            maxBlobBytes = MAX_BLOB_BYTES,
+                            typePolicy = BlobTypePolicy { it != REFUSED_TYPE },
+                        ),
                     blobStorage = storage,
                     blobListeners = listOf(BlobListener { _, _, blob -> accepted += blob }),
                 ).blobs,
@@ -94,6 +103,45 @@ class BlobServiceTest {
         // The point of publishing a limit is that nobody pays to transfer a file that was never
         // going to be kept, so the refusal has to come before the permission to send.
         assertTrue(storage.tickets.isEmpty())
+    }
+
+    @Test
+    fun `a blob of a type the host does not accept is refused before any ticket exists`() {
+        val refused = descriptor(contentType = REFUSED_TYPE)
+
+        val failure = assertFailsWith<BlobUnsupportedTypeException> { blobs.register(scope, ledger, refused) }
+
+        assertEquals(REFUSED_TYPE, failure.contentType)
+        assertTrue(storage.tickets.isEmpty())
+        assertEquals(BlobRefusalCode.UNSUPPORTED_TYPE, failure.toBlobRefusal()?.code)
+    }
+
+    @Test
+    fun `bytes the host rejects are refused for good and never served`() {
+        val descriptor = descriptor()
+        blobs.register(scope, ledger, descriptor)
+        storage.reject(storage.keyOf(scope, ledger, descriptor.blobId), "not a JPEG")
+
+        val failure =
+            assertFailsWith<BlobRejectedException> { blobs.markUploaded(scope, ledger, descriptor.blobId) }
+
+        // Final rather than "send it again": the bytes are the ones the device meant to send.
+        assertEquals(BlobRefusalCode.CONTENT_REJECTED, failure.toBlobRefusal()?.code)
+        assertEquals(BlobState.PENDING, blobs.download(scope, ledger, descriptor.blobId).blob.state)
+        assertNull(blobs.download(scope, ledger, descriptor.blobId).download)
+        assertTrue(accepted.isEmpty())
+    }
+
+    @Test
+    fun `a refusal a retry can fix is told apart from one it cannot`() {
+        val descriptor = descriptor()
+        blobs.register(scope, ledger, descriptor)
+
+        val failure =
+            assertFailsWith<BlobNotStoredException> { blobs.markUploaded(scope, ledger, descriptor.blobId) }
+
+        assertEquals(BlobRefusalCode.NOT_STORED, failure.toBlobRefusal()?.code)
+        assertNull(UnknownBlobException(ledger, descriptor.blobId).toBlobRefusal())
     }
 
     @Test
@@ -317,10 +365,11 @@ class BlobServiceTest {
     private fun descriptor(
         size: Long = SIZE,
         checksum: BlobChecksum? = null,
+        contentType: BlobContentType = BlobContentType("image/jpeg"),
     ): BlobDescriptor =
         BlobDescriptor(
             blobId = BlobId(Uuid.random()),
-            contentType = BlobContentType("image/jpeg"),
+            contentType = contentType,
             size = size,
             checksum = checksum,
         )
@@ -328,5 +377,6 @@ class BlobServiceTest {
     private companion object {
         const val SIZE = 2_418_123L
         const val MAX_BLOB_BYTES = 4L * 1024 * 1024
+        val REFUSED_TYPE = BlobContentType("application/x-msdownload")
     }
 }

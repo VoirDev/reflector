@@ -160,6 +160,25 @@ class BlobMaintenanceTest {
     }
 
     @Test
+    fun `an upload whose bytes the host rejected is left alone rather than failing the sweep`() {
+        val rejected = descriptor()
+        val arrived = descriptor()
+        blobs.register(scope, ledger, rejected)
+        blobs.register(scope, ledger, arrived)
+        storage.reject(storage.keyOf(scope, ledger, rejected.blobId), "not a JPEG")
+        storage.put(storage.keyOf(scope, ledger, arrived.blobId), SIZE)
+        clock.instant += TICKET_LIFE + 1.hours
+
+        val confirmed = module.maintenance.confirmPendingUploads()
+
+        // It stays pending for good and is met on every pass; a sweep that stopped at it would
+        // never confirm anything behind it again.
+        assertEquals(1, confirmed)
+        assertEquals(BlobState.PENDING, blobs.download(scope, ledger, rejected.blobId).blob.state)
+        assertEquals(BlobState.READY, blobs.download(scope, ledger, arrived.blobId).blob.state)
+    }
+
+    @Test
     fun `an upload still inside its ticket is not touched`() {
         val descriptor = descriptor()
         blobs.register(scope, ledger, descriptor)

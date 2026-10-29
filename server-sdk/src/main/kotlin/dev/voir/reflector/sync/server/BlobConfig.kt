@@ -15,15 +15,21 @@ import kotlin.time.Duration.Companion.minutes
  *   a ticket is issued, so an oversized file is refused before any of it is transferred — after the
  *   fact the bytes have already been paid for on somebody's mobile data.
  * @property maxBlobsPerEntity Largest number of blobs one entity's document may reference. It bounds
- *   a list the client otherwise controls.
+ *   a list the client otherwise controls. A document that already references more — stored under an
+ *   earlier, higher limit — keeps them: it may be written again with as many as it has, and is refused
+ *   only when it would reference more than both this limit and what it referenced before. Lowering
+ *   the limit therefore stops lists from growing without making old documents impossible to edit.
  * @property uploadTicketLife How long the host honours an upload ticket. The module does not enforce
  *   it — the host's own signature does — and publishes it so that a client can tell a transfer that
  *   is merely slow from one whose permission has run out.
+ * @property typePolicy Which declared media types may be registered. Not published: a client keeps
+ *   its own copy of the rule, because attaching a file has to work while it cannot ask.
  */
 public data class BlobConfig(
     public val maxBlobBytes: Long = DEFAULT_MAX_BLOB_BYTES,
     public val maxBlobsPerEntity: Int = DEFAULT_MAX_BLOBS_PER_ENTITY,
     public val uploadTicketLife: Duration = DEFAULT_UPLOAD_TICKET_LIFE,
+    public val typePolicy: BlobTypePolicy = BlobTypePolicy.ANY,
 ) {
     init {
         require(maxBlobBytes > 0) { "the blob size limit has to be positive" }

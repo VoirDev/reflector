@@ -166,7 +166,9 @@ internal class BlobReconciler(
             transactions.transaction {
                 val record = stores.blobs.find(scope, collection, blobId)
                 when (record?.state) {
-                    BlobTransferState.UNAVAILABLE -> {
+                    // A refused file is sent again only because somebody asked: a server whose rules
+                    // have changed since is the one case in which the same bytes get a new answer.
+                    BlobTransferState.UNAVAILABLE, BlobTransferState.REFUSED -> {
                         val restart = if (stat != null) BlobTransferState.LOCAL else BlobTransferState.REMOTE
                         stores.blobs.setState(scope, collection, blobId, restart)
                         stores.blobs.setWanted(scope, collection, blobId, wanted = true)

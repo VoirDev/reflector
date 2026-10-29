@@ -6,6 +6,7 @@ import dev.voir.reflector.sync.protocol.ScopeId
 import dev.voir.reflector.sync.protocol.blob.BlobState
 import dev.voir.reflector.sync.server.BlobConfig
 import dev.voir.reflector.sync.server.BlobNotStoredException
+import dev.voir.reflector.sync.server.BlobRejectedException
 import dev.voir.reflector.sync.server.BlobStorage
 import dev.voir.reflector.sync.server.BlobSweepReport
 import dev.voir.reflector.sync.server.PurgeReport
@@ -196,7 +197,9 @@ public class SyncMaintenance internal constructor(
      *
      * A blob whose object never arrived throws from here and that is the expected, common case: an
      * abandoned upload is an ordinary thing for a user to produce, and it is left alone to be
-     * collected by [collectBlobs] once nothing references it.
+     * collected by [collectBlobs] once nothing references it. A blob whose bytes the host rejected
+     * is left alone the same way — it stays pending for good, so it is met again on every pass, and
+     * treating it as a fault would stop the sweep at the same file every time.
      *
      * @return Number of blobs this pass made usable.
      */
@@ -223,7 +226,9 @@ public class SyncMaintenance internal constructor(
                         onSuccess = { true },
                         onFailure = { failure ->
                             // Anything else is a fault worth surfacing rather than counting.
-                            if (failure !is BlobNotStoredException) throw failure
+                            if (failure !is BlobNotStoredException && failure !is BlobRejectedException) {
+                                throw failure
+                            }
                             false
                         },
                     )

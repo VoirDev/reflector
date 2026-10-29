@@ -38,7 +38,10 @@ class S3BlobStorage(private val s3: S3Presigner, private val bucket: String) : B
     override fun createDownload(scope, collection, blob) = s3.presignGet(bucket, blob.storageKey)
 
     // A HEAD. You observe; the module compares the answer with what the client declared and
-    // decides. Reporting no checksum is fine and never fails a verification on its own.
+    // decides. Reporting no checksum is fine and never fails a verification on its own. The one
+    // judgement that is yours: answer BlobVerification.Rejected for bytes you will not keep — a
+    // ranged GET of the first bytes shows whether a declared PDF is a PDF — and the file is refused
+    // for good.
     override fun verify(scope, collection, blob) = s3.head(bucket, blob.storageKey) // …
 
     // Not an instruction. The module has already dropped its rows: nothing points at these any
@@ -55,7 +58,16 @@ Wire it in, and publish the three endpoints over `module.blobs`:
 ```kotlin
 SyncModule.create(
     database = database,
-    config = syncConfig(collections = setOf(ledger), blobs = BlobConfig(maxBlobBytes = 25.mb)),
+    config =
+        syncConfig(
+            collections = setOf(ledger),
+            blobs =
+                BlobConfig(
+                    maxBlobBytes = 5.mb,
+                    maxBlobsPerEntity = 10,
+                    typePolicy = BlobTypePolicy { it.value.substringBefore(';').trim().lowercase() in accepted },
+                ),
+        ),
     blobStorage = S3BlobStorage(presigner, bucket),
     blobListeners = listOf(BlobListener { scope, collection, blob -> thumbnails.submit(blob) }),
 )
@@ -64,6 +76,13 @@ SyncModule.create(
 `config.blobs` and `blobStorage` go together or not at all; either half alone is refused at
 assembly, because either half alone surfaces as a failure on a user's first attachment rather than
 on the line that was wrong.
+
+**Three limits, all checked before a byte moves.** The size and the type are judged from what the
+client declares at registration, so a file the server will not keep is refused before anybody pays to
+send it. The type policy is yours to write and is not published — a client keeps its own copy of the
+rule, because attaching a file has to work while it cannot ask. `maxBlobsPerEntity` can be lowered
+without breaking old documents: one stored under a higher limit may be written again with as many
+files as it had, and is refused only when it would grow.
 
 **`BlobListener` is the acknowledgement you asked for.** It fires once per file, after the commit
 that made it usable, and it is where thumbnailing, scanning and extraction belong. It is reached
@@ -81,6 +100,20 @@ POST /v1/sync/{scope}/{collection}/blobs                   → module.blobs.regi
 POST /v1/sync/{scope}/{collection}/blobs/{id}/complete     → module.blobs.markUploaded(…)
 GET  /v1/sync/{scope}/{collection}/blobs/{id}              → module.blobs.download(…)
 ```
+
+A refused file is answered `409` with the reason in the body, and the module writes the body for you:
+
+```kotlin
+} catch (failure: SyncServerException) {
+    val refusal = failure.toBlobRefusal()                          // null when it is not a refusal
+    if (refusal != null) call.respond(HttpStatusCode.Conflict, refusal)
+}
+```
+
+The code in it is what lets the client tell a refusal it may outlast — `NOT_STORED`, an upload the
+storage did not bear out — from one it never will: `TOO_LARGE`, `UNSUPPORTED_TYPE`,
+`CONTENT_REJECTED`. Without it a file the server will never keep is sent again until the client runs
+out of attempts. Only on the blob routes: everywhere else `409` means a purged collection.
 
 `markUploaded` is also what your storage's event notification should call — a device can die between
 writing the object and reporting it, and then the bytes sit there unfetchable forever. Publish
@@ -243,6 +276,7 @@ collection.blob(photoId).collect { state ->
         state == null -> showNothing()                        // no document names it yet
         state.state == READY -> showPhoto()
         state.state == UNAVAILABLE -> showBroken()            // onFailed has already told you why
+        state.state == REFUSED -> showRefused()               // the server will not keep it
         state.wanted -> showProgress(state.transferred, state.size)   // REMOTE or DOWNLOADING
         else -> showDownloadOffer()                           // REMOTE, and nobody asked
     }
@@ -267,6 +301,14 @@ under the default binding the record naming it is already on every device — so
 attachment and offer to retry or detach it. The library will not drop the reference for you: that is
 your document, and a receipt worth asking a user about should not vanish silently.
 
+`REFUSED` is a file this device holds that the server will not take — too large, of a type it does not
+accept, or with content it rejected — and `onFailed` says which, as `BlobFailure.TooLarge` or
+`BlobFailure.Refused(code)`. Nothing retries it, because the same bytes would be refused again, and a
+push leaves it off the record so the record still goes out. Offer to detach it or to attach another
+file; `retry` sends it again, which is only worth offering once the server's rules have changed. The
+best refusal is the one that never happens, so check the size and type yourself when the file is
+attached, with the same limits the server enforces.
+
 ## Checklist
 
 Server:
@@ -276,13 +318,15 @@ Server:
 3. `markUploaded` reachable from your storage's event notifications, and `blobReady` published on the
    scope's socket after it.
 4. `confirmPendingUploads` and `collectBlobs` on your schedule — the dry run read first.
+5. A refused file answered `409` with `toBlobRefusal()`'s body on the blob routes.
 
 Client:
 
 1. A `BlobStore` and a `BlobTransport` passed to the engine — both or neither.
 2. `blobs()` answered for every entity type that can name a file, with the whole set every time.
 3. Bytes written before the `mutate` that names them.
-4. `REMOTE` / `DOWNLOADING` rendered as ordinary states rather than as errors.
+4. `REMOTE` / `DOWNLOADING` rendered as ordinary states rather than as errors, and `REFUSED` as a
+   file to detach or replace rather than one to wait for.
 5. If your files are large enough that holding them all is a cost: `blobFetch = ON_DEMAND`, a
    `fetch(blobId)` from the screen that opens the record, `REMOTE` with `wanted = false` drawn as an
    offer rather than a wait, and each file's size kept in your own document — a file nobody has

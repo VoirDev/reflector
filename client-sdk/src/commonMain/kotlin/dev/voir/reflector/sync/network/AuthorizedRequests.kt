@@ -30,12 +30,13 @@ import kotlin.time.Duration.Companion.seconds
  * @property interpret How a status that is not a success becomes a failure the engine reacts to.
  *   Replaceable because the same code means different things on different paths of this protocol:
  *   `409` is a purged collection when reading the log and a refused file when uploading one, and a
- *   single mapping would have an upload failure wipe the collection it belongs to.
+ *   single mapping would have an upload failure wipe the collection it belongs to. Suspending,
+ *   because a refused file's reason is in the body and reading a body suspends.
  */
 internal class AuthorizedRequests(
     private val tokens: TokenProvider,
     private val logger: SyncLogger,
-    private val interpret: (HttpResponse) -> SyncTransportFailure? = { null },
+    private val interpret: suspend (HttpResponse) -> SyncTransportFailure? = { null },
 ) {
     /**
      * Issues a request, refreshing the credentials once if the server refuses them.
@@ -100,18 +101,14 @@ internal class AuthorizedRequests(
      * @return The response, when it was a success.
      * @throws SyncTransportFailure When it was not.
      */
-    fun ensureSuccess(response: HttpResponse): HttpResponse =
+    suspend fun ensureSuccess(response: HttpResponse): HttpResponse {
+        if (response.status.isSuccess()) {
+            return response
+        }
+        // Asked before the shared mapping, never after: what it overrides are codes the shared
+        // mapping already has an answer for, and a wrong one. Asked once, because it may read the body.
+        interpret(response)?.let { throw it }
         when {
-            response.status.isSuccess() -> {
-                response
-            }
-
-            // Asked before the shared mapping, never after: what it overrides are codes the shared
-            // mapping already has an answer for, and a wrong one.
-            interpret(response) != null -> {
-                throw checkNotNull(interpret(response))
-            }
-
             response.status == HttpStatusCode.Unauthorized -> {
                 throw SyncTransportFailure.Unauthorized("the server refused the credentials")
             }
@@ -140,6 +137,7 @@ internal class AuthorizedRequests(
                 throw SyncTransportFailure.ServerError(response.status.value, response.status.description)
             }
         }
+    }
 
     private fun HttpResponse.retryAfter(): Duration? = headers[HttpHeaders.RetryAfter]?.toLongOrNull()?.seconds
 

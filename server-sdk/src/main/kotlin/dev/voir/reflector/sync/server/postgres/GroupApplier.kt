@@ -105,10 +105,12 @@ internal class GroupApplier(
     /**
      * Finds the reason a group cannot be applied at all, if there is one.
      *
-     * Runs under the counter lock, which is why the one query it adds is a single indexed read of at
-     * most one row per distinct blob in the group. It has to be under the lock rather than before
+     * Runs under the counter lock, which is why the query it always adds is a single indexed read of
+     * at most one row per distinct blob in the group. It has to be under the lock rather than before
      * it: what it checks is that the referenced blobs exist, and the sweep that could remove one
-     * takes the same lock, so checking outside it would leave exactly the race the check is for.
+     * takes the same lock, so checking outside it would leave exactly the race the check is for. A
+     * document over the reference limit costs one more primary-key read, of what it referenced
+     * before.
      */
     private fun rejectionOf(
         collectionRowId: Uuid,
@@ -146,7 +148,12 @@ internal class GroupApplier(
             }
             val declared = (op as? PushOperation.Upsert)?.blobs ?: continue
             val perEntity = config.blobs?.maxBlobsPerEntity
-            if (perEntity != null && declared.size > perEntity) {
+            // The stored count is read only for a document already over the limit, which is almost
+            // never: the ordinary push pays nothing for the allowance.
+            if (perEntity != null &&
+                declared.size > perEntity &&
+                declared.size > storedReferenceCount(collectionRowId, op.entity, op.id)
+            ) {
                 return RejectError(
                     code = RejectCode.TOO_LARGE,
                     entity = op.entity,
@@ -157,6 +164,24 @@ internal class GroupApplier(
         }
         return missingBlobRejection(collectionRowId, group)
     }
+
+    /**
+     * Counts the blobs an entity's stored document references now.
+     *
+     * What lets a document stored under an earlier, higher limit be written again: the limit stops a
+     * list from growing, and refusing one that merely stays as long as it was would make an old
+     * record impossible to edit — and on a client, a refused group stops the whole queue behind it.
+     *
+     * @param collectionRowId Row identifier of the collection.
+     * @param entityType Type of the entity.
+     * @param entityId Entity whose references to count.
+     * @return Number of blobs referenced, zero for an entity never written or one that names none.
+     */
+    private fun storedReferenceCount(
+        collectionRowId: Uuid,
+        entityType: EntityType,
+        entityId: EntityId,
+    ): Int = references.of(collectionRowId, entityType, listOf(entityId))[entityId].orEmpty().size
 
     /**
      * Refuses a group that points at a blob this collection has never registered.

@@ -131,4 +131,25 @@ class BlobWireFormatTest {
 
         assertEquals(expected, json.encodeToJsonElement(BlobDescriptor.serializer(), descriptor))
     }
+
+    @Test
+    fun `a refusal carries its code as a plain string`() {
+        val refusal = BlobRefusal(BlobRefusalCode.UNSUPPORTED_TYPE, "application/zip is not accepted")
+
+        val expected =
+            json.parseToJsonElement(
+                """{"code": "UNSUPPORTED_TYPE", "message": "application/zip is not accepted"}""",
+            )
+
+        assertEquals(expected, json.encodeToJsonElement(BlobRefusal.serializer(), refusal))
+    }
+
+    @Test
+    fun `a refusal code this client has never heard of still parses`() {
+        val refusal =
+            json.decodeFromString(BlobRefusal.serializer(), """{"code": "QUARANTINED", "message": "held"}""")
+
+        // Data rather than a parse failure, so the client can still treat the file as refused.
+        assertEquals(BlobRefusalCode("QUARANTINED"), refusal.code)
+    }
 }

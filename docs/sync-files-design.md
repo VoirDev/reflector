@@ -278,12 +278,17 @@ GET  /v1/sync/{scope}/{collection}/blobs/{blobId}          → get a download ti
  "upload":{"method":"PUT","url":"https://…","headers":{"Content-Type":"image/jpeg"},
            "expiresAt":"2026-09-15T12:34:56Z"}}
 // → 200 with "state":"ready" and "upload":null, when the blob is already there (idempotent)
-// → 409 when the identifier is known with different bytes (size or checksum disagree)
-// → 413 when the size exceeds the published limit
+// → 409 CONFLICT when the identifier is known with different bytes (size or checksum disagree)
+// → 409 TOO_LARGE when the size exceeds the published limit
+// → 409 UNSUPPORTED_TYPE when the host's type policy does not accept the declared media type
 
 // POST …/blobs/{blobId}/complete                                      — body: {}
 // → 200 BlobInfo: {"blobId":"018f…","state":"ready","contentType":"image/jpeg","size":2418123,…}
-// → 409 when the host cannot find the object, or it disagrees about size or checksum
+// → 409 NOT_STORED when the host cannot find the object, or it disagrees about size or checksum
+// → 409 CONTENT_REJECTED when the host inspected the object and will not keep it
+
+// every 409 above carries a BlobRefusal:
+{"code":"UNSUPPORTED_TYPE","message":"blob 018f… declares application/zip, which is not accepted"}
 
 // GET …/blobs/{blobId}                                                — BlobDownload
 // → 200 {"blob":{…,"state":"ready"},
@@ -302,6 +307,22 @@ on a purged collection and `410` on a stale cursor, and a fourth meaning for a r
 neighbouring path is how a client ends up mapping one of them wrong. The blob exists; it is simply
 not servable — that is information, not a failure, and the response says so in the field it already
 has.
+
+**Every refusal of a file is a `409`, and the body says which.** The status is the client's
+instruction — "this file, not this collection" — and it cannot carry the one distinction the client
+needs next: whether sending the bytes again could change the answer. `NOT_STORED` can, because nothing
+was accepted under the identifier; `CONFLICT` is a client bug the client retries within its bounded
+attempts, as it always has; `TOO_LARGE`, `UNSUPPORTED_TYPE` and `CONTENT_REJECTED` cannot, and a
+client that retried them would send a file the server will never keep until its attempts ran out,
+and then call it a transfer that kept failing. The codes are open, like the push refusal codes, and a
+code a client does not know is a final refusal. A `409` with no readable body — a host that predates
+the codes — is a refusal without a code and is treated as every refusal was before.
+
+The type check and the content check are the host's, not the module's. The module still never reads
+a byte: it asks the host's `BlobTypePolicy` about the declared type at registration, and the host's
+storage port may answer `BlobVerification.Rejected` when it is asked to verify. A rejected blob stays
+`pending` for good — nothing ever serves it — and is collected like any other once no document names
+it.
 
 The field, on a push operation:
 
@@ -457,7 +478,7 @@ reference rows are written in the transaction that applies a batch.
 ```sql
 sync_blob(
   scope_id TEXT, collection_id TEXT, blob_id BLOB(16),   -- PK
-  state TEXT,                  -- LOCAL | UPLOADING | UPLOADED | REMOTE | DOWNLOADING | READY | UNAVAILABLE
+  state TEXT,                  -- LOCAL | UPLOADING | UPLOADED | REMOTE | DOWNLOADING | READY | UNAVAILABLE | REFUSED
   wanted INTEGER NOT NULL DEFAULT 0,        -- whether this device is trying to hold the bytes
   content_type TEXT NULL, size INTEGER NULL, checksum TEXT NULL,
   attempts INTEGER NOT NULL DEFAULT 0, next_retry_at INTEGER NULL, last_error TEXT NULL,
@@ -489,6 +510,7 @@ The states and what they mean:
 | `DOWNLOADING` | arriving | `READY` |
 | `READY` | on the device | `READY` |
 | `UNAVAILABLE` | gone or unreachable | unknown |
+| `REFUSED` | on the device | will not keep it |
 
 `UPLOADED` and `READY` are the same server-side fact reached from the two ends, and they are kept
 apart because only they say the bytes were ever on this device too. No ticket is ever stored: a
@@ -609,7 +631,7 @@ group, which is the whole of what `DEFERRED` means in code.
 on the server by definition, whether this device has fetched the bytes or has declined to. Asking
 for `UPLOADED` alone would hold a group for a download nobody asked for — and under `ON_DEMAND` would
 hold it for good, because that download is never going to start. What still holds a `REQUIRED` group
-is `LOCAL`, `UPLOADING` and `UNAVAILABLE`, which is the cost that binding announces.
+is `LOCAL`, `UPLOADING`, `UNAVAILABLE` and `REFUSED`, which is the cost that binding announces.
 
 An upload is three calls and a state each: `register` → `UPLOADING`, `upload` (straight to the
 host's storage), `complete` → `UPLOADED`. A crash between any two of them is recovered by repeating
@@ -664,8 +686,10 @@ every blob in the collection — is the wrong shape for the only screen that nee
 **`state` and `wanted` together are what a screen switches on**, and neither is enough alone.
 Bytes here — `LOCAL`, `UPLOADING`, `UPLOADED`, `READY` — is a file to draw. `REMOTE` while nothing
 wants it is an offer to download. `REMOTE` or `DOWNLOADING` while something does is a spinner and a
-fraction. `UNAVAILABLE` is the one failure a user can act on, and the action is `fetch` again. There
-is no fifth case, and none in which the two fields disagree about what to draw.
+fraction. `UNAVAILABLE` is the one failure a user can act on by trying again, and the action is
+`fetch`. `REFUSED` is a file the server will not keep, and the action is the user's own — detach it,
+or attach another. There is no further case, and none in which the two fields disagree about what to
+draw.
 
 `fetch` is idempotent and safe on every redraw; `evict` is refused for a file whose bytes are the
 only copy — one this device created and has not finished uploading — because freeing a cache and
@@ -894,7 +918,12 @@ foreign key, turning a clean refusal into a failed request. The sweep honours th
 
 A document may also name more blobs than `maxBlobsPerEntity` allows, which is refused as `TOO_LARGE`
 alongside an oversized group or document: the reference list is one more thing a client controls the
-length of.
+length of. The limit bounds growth rather than size. A document that already references more — stored
+under an earlier, higher limit — may be written again with as many as it has, or fewer, and is
+refused only when it would reference more than both the limit and what it referenced before. Without
+that, lowering the limit would make every such record impossible to edit, and on the client a
+refused group stops the whole queue behind it. Reading what the entity referenced costs one
+primary-key read, and only for a document already over the limit.
 
 **The rows go first, and the objects are handed over afterwards.** Maintenance finds blobs whose
 `unreferenced_since` is older than the retention window, drops their rows under the collection's
@@ -1076,6 +1105,7 @@ thing that changed is one bit on one device — which is the whole of what this 
 | The local file is gone before the upload, `REQUIRED` | The same, plus `adapter.onRejected(entityType, id, BlobUnavailable)`: the group is `FAILED` and the queue stops on it, exactly as for an oversized group. Only the application can move it — drop the reference, or attach another file |
 | The upload ticket expired mid-transfer | Register again, upload again. The blob row is the state; nothing is lost but the bytes already sent |
 | `complete` says the host cannot find the object | Back to `LOCAL` and upload again, bounded by attempts, then `UNAVAILABLE` |
+| Registration or `complete` is refused `TOO_LARGE`, `UNSUPPORTED_TYPE`, `CONTENT_REJECTED`, or a code the client does not know | `REFUSED` at once, no second attempt, `BlobStore.onFailed(Refused(code))`. Pushes leave the file off the record's declared blobs, so the record still goes out under `DEFERRED`, and the push queue is woken to send it. Only `retry` sends the bytes again |
 | The device died between `PUT` and `complete` | The host's storage event (7.3 path 2) or the sweep (path 3) promotes the blob; the client's `complete` on the next run is a no-op |
 | The push is refused `BLOB_MISSING` | The blob was collected while the group sat blocked, or was never registered. It goes back to `LOCAL`, is registered and uploaded again, and the group is re-sent under a **new** identifier — its content is unchanged, but the server stored an answer under the old key |
 | The download says `pending` | The blob is registered and still uploading — the ordinary state of a deferred attachment that arrived ahead of its bytes. Retried on a capped backoff, and at once on `blobReady` |
@@ -1084,7 +1114,7 @@ thing that changed is one bit on one device — which is the whole of what this 
 | A file nobody asked for is never fetched | Nothing, on purpose. It is not a failure, it is not retried and it is not counted as incoming; it sits `REMOTE` and unwanted, and the application's own screen is what turns it into a request |
 | A file asked for that no document names | The request is refused with a line in the log. Reconciliation would offer the bytes straight back, so honouring it would be fetching a file to delete it |
 | A file asked to be given up whose bytes are the only copy | Refused with a line in the log, and the bytes stay. Only `UPLOADED` and `READY` say the server has them too |
-| The blob limit is exceeded | Refused locally, before registration, like an oversized group: `onRejected(entityType, id, TooLarge)` |
+| The blob limit is exceeded | Refused locally, before registration: `REFUSED` and `BlobStore.onFailed(TooLarge)`, with nothing registered or sent |
 | The server serves no blobs | The engine refuses to start with a `BlobStore` configured, naming the collection. Better at start-up than as a `404` on the first photograph |
 
 `SyncRejection` gains one case, `BlobUnavailable`. It is a sealed class, so that is a source-breaking

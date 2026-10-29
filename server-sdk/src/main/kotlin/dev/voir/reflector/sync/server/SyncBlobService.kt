@@ -37,6 +37,8 @@ public interface SyncBlobService {
      * @return What the server now knows, and permission to write when there is anything to write.
      * @throws SyncServerException.UnknownCollectionException When the collection is not registered.
      * @throws SyncServerException.BlobTooLargeException When the declared size exceeds the limit.
+     * @throws SyncServerException.BlobUnsupportedTypeException When the deployment's
+     *   [BlobTypePolicy] does not accept the declared media type.
      * @throws SyncServerException.BlobConflictException When the identifier already names a blob
      *   whose bytes were accepted and whose declaration disagrees with this one.
      */
@@ -68,6 +70,8 @@ public interface SyncBlobService {
      * @throws SyncServerException.UnknownBlobException When no such blob was ever registered here.
      * @throws SyncServerException.BlobNotStoredException When the storage has no such object, or
      *   holds one that disagrees with what was declared.
+     * @throws SyncServerException.BlobRejectedException When the storage port rejected the object's
+     *   content; final, unlike the other two.
      */
     public fun markUploaded(
         scope: ScopeId,

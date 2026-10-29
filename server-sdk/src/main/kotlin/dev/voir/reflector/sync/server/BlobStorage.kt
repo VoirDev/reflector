@@ -83,6 +83,10 @@ public interface BlobStorage {
      * declared and decides. Reporting a checksum is optional and never on its own a reason to refuse
      * — see [BlobVerification.Stored].
      *
+     * The one exception to observing is [BlobVerification.Rejected]: a host that inspects content —
+     * reading the first bytes to see that a declared PDF is a PDF — answers it for an object it will
+     * not keep, and the module refuses the blob for good.
+     *
      * @param scope Authorised scope the collection belongs to.
      * @param collection Collection the blob belongs to.
      * @param blob Blob to look for.

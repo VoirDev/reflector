@@ -1,7 +1,7 @@
 [versions]
-kotlin = "2.4.20"
-ksp = "2.3.11"
-agp = "9.4.1"
+kotlin = "2.4.21"
+ksp = "2.3.14"
+agp = "9.5.3"
 
 jvmToolchain = "21"
 androidJvmTarget = "17"
@@ -10,20 +10,20 @@ androidMinSdk = "26"
 androidTargetSdk = "37"
 
 coroutines = "1.11.0"
-serializationJson = "1.11.0"
-kotlinxIo = "0.9.1"
-ktor = "3.6.0"
+serializationJson = "1.13.0"
+kotlinxIo = "0.9.3"
+ktor = "3.6.2"
 room = "3.0.3"
 sqlite = "2.7.1"
 koin = "4.2.2"
 androidxWork = "2.12.0"
 
-exposed = "1.5.0"
-flyway = "13.8.0"
+exposed = "1.6.1"
+flyway = "13.13.0"
 # The reference host's logging backend. Nothing in server-sdk depends on it: the module reports
 # through its own SyncLog port, and this is what the sample's ten-line adapter writes into.
-logback = "1.6.4"
-postgresql = "42.7.13"
+logback = "1.6.8"
+postgresql = "42.7.15"
 hikari = "7.1.0"
 
 turbine = "1.2.1"

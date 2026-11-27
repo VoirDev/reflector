@@ -26,6 +26,8 @@ Every notable change to the published artifacts, in the
 
 - `syncHttpClient` has a new trailing parameter, which changes its binary signature: code compiled
   against 0.1.x has to be compiled again.
+- Built with Kotlin 2.4.21. The artifacts depend on kotlinx.serialization 1.13.0, kotlinx-io 0.9.3,
+  Ktor 3.6.2, and on the server side Exposed 1.6.1 and Flyway 13.13.0.
 
 ### Migrating
 

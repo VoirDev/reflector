@@ -670,7 +670,7 @@ counter, a conditional update by version, batch inserts, keyset pagination, dele
 Five DAO classes would be dead code, and none of them would make any of that clearer.
 
 This used to be recorded as a deliberate departure, because the handbook of the day asked for a DAO
-entity per table. It is no longer a departure: the `exposed-v1-5` skill asks for a DAO entity only
+entity per table. It is no longer a departure: the `exposed-v1` skill asks for a DAO entity only
 where entity navigation, dirty tracking or row lifecycle makes a use case clearer, and for the DSL
 otherwise — which is what this module does. The note is kept rather than deleted because the
 reasoning is the same either way, and because a reader comparing this file against an older revision

@@ -106,9 +106,9 @@ are derived from the path — `dev.voir.reflector.client`, `dev.voir.reflector.s
 `dev.voir.reflector` for the contracts — because identically named modules on both sides otherwise
 collapse into one artifact during resolution.
 
-The build runs Kotlin 2.4.20 with Gradle 9.7.1 and AGP 9.4.1. Both are slightly past what the
-Kotlin Gradle plugin's official compatibility table lists for 2.4.20 (Gradle up to 9.7.0, AGP up to
-9.3.1, as of September 2026). The Kotlin documentation allows newer Gradle and AGP releases but
+The build runs Kotlin 2.4.21 with Gradle 9.9.2 and AGP 9.5.3. Both are past what the Kotlin
+Gradle plugin's official compatibility table lists for 2.4.20–2.4.21 (Gradle up to 9.7.0, AGP up to
+9.3.1, as of November 2026). The Kotlin documentation allows newer Gradle and AGP releases but
 warns of deprecation warnings and features that may not work, so a Gradle or AGP warning is worth
 checking against that table before anything else.
 

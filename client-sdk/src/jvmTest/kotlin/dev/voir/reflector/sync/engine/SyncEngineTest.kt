@@ -569,8 +569,12 @@ class SyncEngineTest {
             transport.onSnapshot = { walletSnapshot("Cash") }
             transport.onPush = { request -> applyingEverything(request) }
             collection.requestSync()
-            collection.state.await("the rebuilt collection with its queue drained") {
-                it.phase == SyncPhase.LIVE && it.pendingCount == 0
+            // Counted from the log rather than read from the state: the state combines the phase and
+            // the pending count, each observed on its own, so "live with nothing pending" can be seen
+            // after the rebuild but before the pending count has caught up with the later change.
+            awaitRecords("the rebuild finished and the later change applied") {
+                logs.records.value.count { it.event == SyncLogEvent.BOOTSTRAP_FINISHED } >= 2 &&
+                    logs.records.value.any { it.event == SyncLogEvent.PUSH_APPLIED }
             }
 
             assertEquals(buildJsonObject { put("title", "Cash") }, adapter.bodies[wallet to walletId])

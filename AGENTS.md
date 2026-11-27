@@ -67,7 +67,7 @@ Before any change to Kotlin code, invoke in this order:
 
 1. `kotlin-style` — always mandatory, for every module and source set.
 2. The skill covering the area being changed, when the plugin has one. Today that is
-   `exposed-v1-5` for the `sync.server.postgres` package of `server-sdk/`, which is mandatory
+   `exposed-v1` for the `sync.server.postgres` package of `server-sdk/`, which is mandatory
    before touching it, and `optional-kmp-v1` for three-state partial updates. The plugin also
    carries `kmp-application-architecture`, and `github-verify-workflow` and
    `github-release-workflow`, which are mandatory before touching `.github/workflows/` or `ci/`.
@@ -75,8 +75,8 @@ Before any change to Kotlin code, invoke in this order:
    example — `kotlin-style` and this repository's own rules are the whole of the standard. That is
    a real answer, not a gap to be filled by guessing at a convention.
 
-The versions line up rather than being assumed to: this repository builds on Kotlin 2.4.20 and
-Exposed 1.5.0, inside what `kotlin-style` (Kotlin 2.4+) and `exposed-v1-5` (Exposed 1.5) are
+The versions line up rather than being assumed to: this repository builds on Kotlin 2.4.21 and
+Exposed 1.6.1, inside what `kotlin-style` (Kotlin 2.4+) and `exposed-v1` (Exposed 1.x, 1.5.1 or later) are
 written against. When a
 dependency in [`gradle/libs.versions.toml`](gradle/libs.versions.toml) moves past what a skill
 states it was validated for, that is a conflict to raise rather than to assume away.
@@ -150,7 +150,7 @@ Invariants that cannot be broken without rewriting the specification:
   nothing but review enforces this — the deliberate exception is `SyncModule.create`, which takes
   the host's Exposed `Database` so the module never picks up a global default.
 
-Before changing anything in the `.postgres` package, invoking the `exposed-v1-5` skill is
+Before changing anything in the `.postgres` package, invoking the `exposed-v1` skill is
 mandatory: it fixes the naming of tables and constraints, the use of `kotlin.uuid`/`kotlin.time`,
 the rules for transactions and the requirements for migrations.
 

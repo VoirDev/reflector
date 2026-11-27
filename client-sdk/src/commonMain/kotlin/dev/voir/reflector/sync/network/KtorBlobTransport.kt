@@ -38,7 +38,7 @@ import io.ktor.http.contentType
 import io.ktor.http.isSuccess
 import io.ktor.utils.io.ByteWriteChannel
 import io.ktor.utils.io.readAvailable
-import io.ktor.utils.io.readRemaining
+import io.ktor.utils.io.readBuffer
 import io.ktor.utils.io.writeFully
 import kotlinx.io.Buffer
 import kotlinx.io.RawSink
@@ -289,7 +289,7 @@ public class KtorBlobTransport(
      */
     private suspend fun storageErrorCode(response: HttpResponse): String? {
         val body =
-            runCatching { response.bodyAsChannel().readRemaining(ERROR_BODY_LIMIT).readString() }
+            runCatching { response.bodyAsChannel().readBuffer(ERROR_BODY_LIMIT).readString() }
                 .getOrNull() ?: return null
         return STORAGE_ERROR_CODE.find(body)?.groupValues?.get(1)
     }

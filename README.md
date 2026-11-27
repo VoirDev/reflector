@@ -76,11 +76,11 @@ The vocabulary you will meet everywhere:
 
 | | |
 |---|---|
-| Kotlin | 2.4.20 |
+| Kotlin | 2.4.21 |
 | JDK | 21 for the server and the JVM client; Android bytecode targets 17 |
 | Client targets | Android (minSdk 26), iOS `iosArm64` / `iosSimulatorArm64`, JVM |
 | Client stack | Room 3 (`androidx.room3`) with KSP, Ktor client, kotlinx.serialization |
-| Server stack | Exposed 1.5 on JDBC, PostgreSQL, Flyway (bundled); any HTTP framework |
+| Server stack | Exposed 1.6 on JDBC, PostgreSQL, Flyway (bundled); any HTTP framework |
 
 ## Installation
 

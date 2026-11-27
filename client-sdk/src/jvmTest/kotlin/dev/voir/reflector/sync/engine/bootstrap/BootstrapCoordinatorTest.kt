@@ -173,6 +173,26 @@ class BootstrapCoordinatorTest {
         }
 
     @Test
+    fun `a refused client version interrupts the snapshot and keeps the page it reached`() =
+        runTest {
+            transport.onSnapshot = { page ->
+                if (page == null) {
+                    SnapshotPage(testCursor("1100"), listOf(item(1, "10", "Cash")), PageToken("p2"), true, TEST_EPOCH)
+                } else {
+                    throw SyncTransportFailure.UpgradeRequired("this client is too old")
+                }
+            }
+
+            val outcome = coordinator.bootstrap()
+
+            assertIs<SyncTransportFailure.UpgradeRequired>(assertIs<BootstrapOutcome.Interrupted>(outcome).failure)
+            val state = assertNotNull(stores.collections.find(scope, collection))
+            assertEquals(SyncPhase.BOOTSTRAPPING, state.phase)
+            assertEquals(PageToken("p2"), state.bootstrapPage, "the updated application resumes from here")
+            assertNotNull(stores.records.find(scope, collection, wallet, entity(1)))
+        }
+
+    @Test
     fun `an interrupted bootstrap resumes and keeps the cursor the first page fixed`() =
         runTest {
             transport.onSnapshot = { page ->

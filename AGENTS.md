@@ -9,6 +9,7 @@ implemented and covered by tests; what is known to be missing is collected in
 
 ```text
 README.md                    The public front page: principles, installation, quick start
+CHANGELOG.md                 What each published version changed, for consumers choosing one
 TODO.md                      Work that is known and not yet done
 docs/
   README.md                  Index of the documentation

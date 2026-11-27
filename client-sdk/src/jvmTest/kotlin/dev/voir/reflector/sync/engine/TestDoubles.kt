@@ -94,8 +94,12 @@ class FakeTransport : SyncTransport {
     /** Whether asking for the limits fails as though the server could not be reached. */
     var limitsUnreachable: Boolean = false
 
+    /** Failure to answer a request for the limits with, or `null` to publish them. */
+    var limitsFailure: SyncTransportFailure? = null
+
     override suspend fun limits(): SyncLimits {
         if (limitsUnreachable) throw SyncTransportFailure.Unreachable("offline")
+        limitsFailure?.let { throw it }
         return limits
     }
 }

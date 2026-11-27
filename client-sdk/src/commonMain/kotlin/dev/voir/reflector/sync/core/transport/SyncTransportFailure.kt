@@ -8,7 +8,8 @@ import kotlin.time.Duration
  *
  * The cases exist because each one leads to a different decision, and collapsing them would mean
  * guessing: a transient failure is retried with backoff, a stale cursor forces a bootstrap, a
- * refused token stops the workers instead of hammering the server, and a revoked scope wipes it.
+ * refused token or a refused client version stops the workers instead of hammering the server, and
+ * a revoked scope wipes it.
  *
  * @param message Description for logs and diagnostics.
  * @param cause Underlying failure, when there is one.
@@ -59,6 +60,20 @@ public sealed class SyncTransportFailure(
      * @property message Description reported by the server.
      */
     public class Unauthorized(
+        message: String,
+    ) : SyncTransportFailure(message)
+
+    /**
+     * The server no longer accepts this version of the client.
+     *
+     * Arrives as `426 Upgrade Required`. Not retried, for the reason [Unauthorized] is not: nothing
+     * the library can do produces a newer client, and every attempt costs the server a request it
+     * has already refused. The queue and the local data are kept, so that the upgraded application
+     * sends what this one could not.
+     *
+     * @property message Description reported by the server.
+     */
+    public class UpgradeRequired(
         message: String,
     ) : SyncTransportFailure(message)
 

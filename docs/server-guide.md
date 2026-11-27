@@ -161,6 +161,11 @@ Collapsing any two of them costs the client one of its recoveries — and collap
 either loses a user's offline edits after an ordinary retention gap, or puts an erased collection
 back after a purge.
 
+`426` means "this build is no longer accepted": the client stops, keeps its queue and data, and
+asks again only on its next trigger or start. Decide it from a header the application sends with
+every request (`syncHttpClient(defaultHeaders = …)`), and answer it on every route, the event
+channel's handshake included.
+
 ## Access control stays in the host
 
 ```kotlin
@@ -343,7 +348,8 @@ three file endpoints and the maintenance they add are in the [files guide](files
 1. `SyncMigrations.migrate` before the first call to the module.
 2. A `Database` you created; never Exposed's global default.
 3. Every entity type registered in its `CollectionSpec`.
-4. `401` / `403` / `409` / `410` distinguishable in your routes.
+4. `401` / `403` / `409` / `410` distinguishable in your routes, and `426` only for a client build
+   you no longer accept.
 5. A commit listener wired to whatever delivers notifications.
 6. `maintenance.trim()` on a schedule you own.
 7. `maintenance.purgeScope` wired to whatever closes an account, after access is revoked.

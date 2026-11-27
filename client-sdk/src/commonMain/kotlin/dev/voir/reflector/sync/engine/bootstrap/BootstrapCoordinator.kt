@@ -159,6 +159,11 @@ internal class BootstrapCoordinator(
         return BootstrapOutcome.Completed
     }
 
+    /**
+     * Decides whether this bootstrap resumes an interrupted one or starts a new generation.
+     *
+     * @return Where the transfer starts from.
+     */
     private suspend fun begin(): Start {
         val state = stores.collections.ensure(scope, collection)
         val resumable = state.phase == SyncPhase.BOOTSTRAPPING && state.bootstrapPage != null
@@ -170,6 +175,12 @@ internal class BootstrapCoordinator(
         return Start(generation = stores.collections.beginBootstrap(scope, collection), page = null, cursor = null)
     }
 
+    /**
+     * Applies one page of the snapshot, keeping local edits that never reached the server.
+     *
+     * @param items Entities on the page.
+     * @param generation Generation the applied records are stamped with.
+     */
     private suspend fun applyPage(
         items: List<SnapshotItem>,
         generation: Long,
@@ -262,6 +273,11 @@ internal class BootstrapCoordinator(
         stores.records.setConflict(scope, collection, item.entity, item.id, conflictId)
     }
 
+    /**
+     * Removes what the finished snapshot did not mention.
+     *
+     * @param generation Generation of the snapshot that has just finished.
+     */
     private suspend fun sweep(generation: Long) {
         val stale = stores.records.staleRecords(scope, collection, generation)
         if (stale.isEmpty()) {
@@ -281,6 +297,12 @@ internal class BootstrapCoordinator(
         references?.sweep(generation)
     }
 
+    /**
+     * Decides what a failed snapshot request means for the transfer.
+     *
+     * @param failure What the transport reported.
+     * @return What the cycle does next.
+     */
     private suspend fun handleFailure(failure: SyncTransportFailure): BootstrapOutcome =
         when (failure) {
             is SyncTransportFailure.CollectionReset -> {
@@ -290,7 +312,10 @@ internal class BootstrapCoordinator(
                 BootstrapOutcome.ResetRequired
             }
 
-            is SyncTransportFailure.Unauthorized, is SyncTransportFailure.Revoked -> {
+            is SyncTransportFailure.Unauthorized,
+            is SyncTransportFailure.UpgradeRequired,
+            is SyncTransportFailure.Revoked,
+            -> {
                 BootstrapOutcome.Interrupted(failure)
             }
 

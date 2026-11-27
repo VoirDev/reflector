@@ -24,8 +24,8 @@ import kotlin.time.Duration.Companion.seconds
  *
  * Two settings are not a matter of taste. The JSON format is the protocol's own — a client that
  * drops nulls turns "clear this field" into "leave it alone" once the server merges the patch. And
- * `expectSuccess` stays off, because the transport maps status codes itself: `409`, `410` and `429`
- * are part of the protocol, not failures to be thrown as generic client exceptions.
+ * `expectSuccess` stays off, because the transport maps status codes itself: `409`, `410`, `426` and
+ * `429` are part of the protocol, not failures to be thrown as generic client exceptions.
  *
  * The WebSocket plugin is installed here as well, so that the event channel and the request
  * endpoints share one client, one engine and one set of settings.
@@ -48,17 +48,27 @@ import kotlin.time.Duration.Companion.seconds
  * [log] rather than to a second destination, so that one sink holds the whole story of a device in
  * order — the engine's decision to push, the request it produced, and what came back.
  *
+ * The application's own headers — a client version, a platform, an installation id — go to every
+ * request the library sends to the synchronisation server, the event channel's handshake included,
+ * and to nothing else. File transfers to a presigned URL share this client and still carry only the
+ * headers their ticket names, because they go to the host's storage, a different server that has
+ * no use for them and that signs its requests over exactly the headers it named. A header the
+ * library sets itself, such as `Authorization`, is never replaced by one of these.
+ *
  * @param engine Platform engine to use.
  * @param log Sink the HTTP tracing is written to. Ignored when [tracing] is
  *   [SyncHttpTracing.NONE], which is the default.
  * @param tracing How much of each exchange to describe. Never includes bodies — see
  *   [SyncHttpTracing].
+ * @param defaultHeaders Header names and values added to every request bound for the
+ *   synchronisation server. Empty by default.
  * @return Configured client, owned by the caller.
  */
 public fun syncHttpClient(
     engine: HttpClientEngine,
     log: SyncLog = SyncLog.None,
     tracing: SyncHttpTracing = SyncHttpTracing.NONE,
+    defaultHeaders: Map<String, String> = emptyMap(),
 ): HttpClient =
     HttpClient(engine) {
         expectSuccess = false
@@ -71,6 +81,9 @@ public fun syncHttpClient(
         install(HttpTimeout) {
             connectTimeoutMillis = CONNECT_TIMEOUT.inWholeMilliseconds
             socketTimeoutMillis = SOCKET_TIMEOUT.inWholeMilliseconds
+        }
+        if (defaultHeaders.isNotEmpty()) {
+            install(syncDefaultHeaders(defaultHeaders))
         }
         if (tracing != SyncHttpTracing.NONE) {
             installTracing(log, tracing)

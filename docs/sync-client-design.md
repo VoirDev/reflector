@@ -663,6 +663,19 @@ once; if that did not help, the collection workers stop and the scope moves to
 the unfinished groups go out. `403` means access to the scope was revoked and is handled the
 same way as the WS `revoked` event.
 
+`426` means the host no longer accepts this version of the client, and is handled like a `401`
+that refreshing could not fix: no backoff, the workers end their cycle, the push queue and the
+data stay as they are, and the scope moves to `ScopeState.UpgradeRequired`. It applies to the
+configuration request as well, which is usually the first one a process sends. While the scope is
+in that state the scope handle stops collecting the event channel, which closes the socket and ends
+its reconnect loop: Ktor's engines report a refused handshake differently, so the state the HTTP
+requests establish is what decides, not the handshake's own status. The next trigger asks again,
+and the first push, log read or snapshot the host accepts returns the scope to `Online` and opens
+the channel afresh. The application's own headers — the build's version among them — reach every
+request to the host through `syncHttpClient(defaultHeaders = …)`; they are attached only to
+requests the library marks as bound for the synchronisation server, so a presigned transfer never
+carries them.
+
 Both halves are the host's to send, and a host that sends only the first leaves the data on the
 device. `403` is what makes the client wipe the scope, and the `revoked` event is what makes it
 happen now rather than at whatever moment the device next asks for something — which on a device
@@ -852,7 +865,7 @@ interface SyncEngine {
 
 interface ScopeHandle {
     val state: StateFlow<ScopeState>           // Online | Offline | ServerUnreachable |
-                                               // AuthRequired | Revoked
+                                               // AuthRequired | UpgradeRequired | Revoked
     val paused: StateFlow<SyncPause?>          // UPLOADS | ALL, or null; the application's, §9
     fun pause(what: SyncPause = SyncPause.ALL)
     suspend fun resume()                       // what was held back goes now, backoff cleared
@@ -932,7 +945,8 @@ merging groups. An unknown code becomes `SyncRejection.Unknown` and is treated a
    it twice.
 6. A group is applied atomically; groups in one request are independent.
 7. `410` on a stale cursor, `409` when the collection was purged and began again, `403` when
-   access to a scope is revoked, `429` with `Retry-After`.
+   access to a scope is revoked, `426` when this version of the client is no longer accepted,
+   `429` with `Retry-After`.
 8. The changelog carries `originClientId` — without it echo suppression is impossible.
 9. Tombstones live at least as long as the declared retention window; that window is published
    so that a client can go to bootstrap early after a long offline stretch.

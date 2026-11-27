@@ -817,6 +817,13 @@ internal class CollectionWorker(
                 recordSuccess(provesAccess = false)
             }
         } catch (failure: SyncTransportFailure) {
+            // Usually the first request of a process, and so usually where a server that no longer
+            // accepts this build says so. Classified like a refused push, not like an outage: an
+            // outage moves the scope only from online, and this has to say what it is.
+            if (failure is SyncTransportFailure.UpgradeRequired) {
+                interrupt(failure)
+                return null
+            }
             log.warn(SyncLogEvent.REQUEST_FAILED, failure) {
                 "the server's limits could not be read, so nothing is sent or applied this cycle"
             }
@@ -851,6 +858,14 @@ internal class CollectionWorker(
             }.also { clientId = it }
     }
 
+    /**
+     * Ends the cycle on a failure only the user, the application or the host can resolve.
+     *
+     * Nothing is scheduled: the queue keeps its groups as they were, and the next cycle — started by
+     * the next trigger, or by the next process — simply asks again.
+     *
+     * @param failure Refused credentials, a refused client version or a revoked scope.
+     */
     private fun interrupt(failure: SyncTransportFailure) {
         log.warn(SyncLogEvent.REQUEST_FAILED, failure) {
             "the scope can no longer be synchronised; the workers stop and the queue is kept"
@@ -858,6 +873,7 @@ internal class CollectionWorker(
         scopeState.value =
             when (failure) {
                 is SyncTransportFailure.Revoked -> ScopeState.Revoked
+                is SyncTransportFailure.UpgradeRequired -> ScopeState.UpgradeRequired
                 else -> ScopeState.AuthRequired
             }
         recordFailure(failure)
@@ -882,13 +898,16 @@ internal class CollectionWorker(
      *   get answered: a push, a read of the log or a snapshot. Such an answer also ends
      *   [ScopeState.AuthRequired] — it means the user signed in again and the application's token
      *   provider now hands out a token the server takes, which is exactly the moment the queue kept
-     *   for them can leave. The server-wide limits say nothing about that and must not.
+     *   for them can leave. The server-wide limits say nothing about that and must not. It ends
+     *   [ScopeState.UpgradeRequired] the same way: such an answer means the server takes this build
+     *   again.
      */
     private fun recordSuccess(provesAccess: Boolean = true) {
         scopeState.compareAndSet(ScopeState.Offline, ScopeState.Online)
         scopeState.compareAndSet(ScopeState.ServerUnreachable, ScopeState.Online)
         if (provesAccess) {
             scopeState.compareAndSet(ScopeState.AuthRequired, ScopeState.Online)
+            scopeState.compareAndSet(ScopeState.UpgradeRequired, ScopeState.Online)
         }
     }
 
@@ -929,6 +948,10 @@ internal class CollectionWorker(
 
                 is SyncTransportFailure.Unauthorized -> {
                     SyncFailure.AuthRequired(failure.describe())
+                }
+
+                is SyncTransportFailure.UpgradeRequired -> {
+                    SyncFailure.UpgradeRequired(failure.describe())
                 }
 
                 is SyncTransportFailure.Revoked -> {

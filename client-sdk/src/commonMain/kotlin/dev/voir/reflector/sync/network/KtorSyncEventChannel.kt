@@ -42,6 +42,16 @@ import kotlin.time.Duration.Companion.seconds
  * refuses, a proxy in the way — which is a real misconfiguration that costs every client its
  * latency and nothing else visible. So each attempt is described, and a run of them is escalated.
  *
+ * A server that refuses this version of the client refuses the handshake too, and this loop does
+ * not tell that apart from any other refusal: Ktor's engines report a refused handshake
+ * differently, and not all of them with its status. The synchronisation engine ends the loop
+ * instead — it stops listening while the scope is
+ * [dev.voir.reflector.sync.core.ScopeState.UpgradeRequired], which the server's `426` on an
+ * ordinary request establishes the same way on every platform.
+ *
+ * The handshake carries the headers given to [syncHttpClient], like every other request to the
+ * synchronisation server.
+ *
  * @param client HTTP client with the WebSocket plugin installed, as built by [syncHttpClient].
  * @param baseUrl Root the endpoint is resolved against; `http` and `https` are upgraded by Ktor.
  * @param tokens Application's source of credentials.
@@ -72,6 +82,7 @@ public class KtorSyncEventChannel(
                                 takeFrom(baseUrl)
                                 appendPathSegments(API, "sync", scope.value, "events")
                             }
+                            markForSyncServer()
                             token?.let { header(HttpHeaders.Authorization, "Bearer $it") }
                         },
                     ) {
@@ -135,9 +146,21 @@ public class KtorSyncEventChannel(
         }
     }
 
+    /**
+     * Parses a frame into an event.
+     *
+     * @param text Body of a text frame.
+     * @return The event, or `null` when the frame is not one this client can read.
+     */
     private fun decode(text: String) =
         runCatching { SyncProtocolJson.format.decodeFromString(SyncEventSerializer, text) }.getOrNull()
 
+    /**
+     * How long to wait before the next connection attempt: doubling from [minRetry] up to [maxRetry].
+     *
+     * @param attempt Number of consecutive failed attempts, starting at one.
+     * @return Delay before reconnecting.
+     */
     private fun retryDelay(attempt: Int): Duration {
         val exponent = (attempt - 1).coerceIn(0, MAX_EXPONENT)
         return minOf(minRetry * (1 shl exponent), maxRetry)

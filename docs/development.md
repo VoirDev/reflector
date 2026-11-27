@@ -101,7 +101,7 @@ block the queue.
 
 ## Versions
 
-`VERSION` holds the repository version (currently `0.1.1`) and every module takes it. Coordinates
+`VERSION` holds the repository version (currently `0.2.0`) and every module takes it. Coordinates
 are derived from the path — `dev.voir.reflector.client`, `dev.voir.reflector.server`,
 `dev.voir.reflector` for the contracts — because identically named modules on both sides otherwise
 collapse into one artifact during resolution.

@@ -9,7 +9,8 @@ import dev.voir.reflector.sync.protocol.EntityType
  *
  * The cases differ in what the application can do about them, which is the only reason to
  * distinguish them: a transient failure needs no reaction, an authentication failure needs the
- * user, and a rejection needs the data to change before anything can move again.
+ * user, a refused client version needs a newer build, and a rejection needs the data to change
+ * before anything can move again.
  *
  * Whatever the library knows is kept rather than flattened into a sentence. A case that came from a
  * throwable carries it, because the description of a fault in code this library does not own is
@@ -79,6 +80,20 @@ public sealed class SyncFailure {
      * @property message Description reported by the server.
      */
     public data class AuthRequired(
+        override val message: String,
+    ) : SyncFailure()
+
+    /**
+     * The server no longer accepts this version of the client.
+     *
+     * The workers stop rather than back off: no attempt from this build can succeed. The queue and
+     * the local data are kept, so the application, once updated, sends what this build could not.
+     * Reported here as well as through [ScopeState.UpgradeRequired], for the reason [AuthRequired]
+     * is.
+     *
+     * @property message Description reported by the server.
+     */
+    public data class UpgradeRequired(
         override val message: String,
     ) : SyncFailure()
 

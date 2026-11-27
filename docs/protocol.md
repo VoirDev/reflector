@@ -44,6 +44,7 @@ The codes are the client's recovery instructions, so the host must keep them dis
 | `403` | The scope was revoked | Wipes the scope's data |
 | `409` | The collection was purged and began again | Discards the collection, unsent changes included, and rebuilds from a snapshot |
 | `410` | The cursor is older than the retention window | Bootstraps from a snapshot, keeping unsent changes |
+| `426` | This version of the client is no longer accepted | Stops the workers and closes the event channel; the scope becomes `UpgradeRequired` with data and queue intact |
 | `429` | Slow down, with `Retry-After` | Waits as told |
 
 Any other status is a transient server error to the client: the request is retried with backoff and
@@ -51,6 +52,15 @@ the queue is kept. A host that refuses requests for reasons of its own business,
 an account it will not take uploads from, answers with a status outside this table. Reusing one of
 these would order the device to wipe, discard or rebuild. The client application learns of the
 status through the failure it is shown, and may pause the scope's uploads until the reason passes.
+
+`426` applies to every request a client sends to the host — the configuration, the documents, the
+file endpoints and the event channel's handshake — and is how a host turns away a build it no longer
+supports. The document workers do not back off against it: they ask again only on the next trigger
+or start, and the first answer the host accepts returns the scope to `Online`. A file download it
+interrupted stays pending on the file worker's own backoff and is never given up on. The host
+decides which builds to refuse from headers the application sends with every request
+(`syncHttpClient(defaultHeaders = …)`, in the [client guide](client-guide.md#transport)); the
+protocol names none.
 
 Collapsing any two of them costs the client one of its recoveries — collapsing `409` and `410`
 either loses a user's offline edits after an ordinary retention gap, or puts an erased collection

@@ -244,6 +244,11 @@ client refreshes once, and if that fails the workers stop and the scope becomes 
 data and queue intact — the user signs in again and the pending groups go out. `403` means the scope
 was revoked, and is handled like the `revoked` event: the data goes away.
 
+`426` is a host refusing this version of the client. It is handled like a `401` that refreshing
+cannot fix — the workers stop, the event channel closes, and data and queue are kept — because a
+retry from the same build can only be refused again; the scope becomes `UpgradeRequired` until an
+answer the host accepts, which in practice is the updated application's first.
+
 Revocation is the host's, and it is both of those together. `403` is what makes a client wipe a
 scope; the `revoked` event is what makes it happen now rather than whenever that device next asks
 for something. The server module holds no access state and can send neither on the host's behalf —

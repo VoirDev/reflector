@@ -176,6 +176,13 @@ internal class PullCoordinator(
         }
     }
 
+    /**
+     * Applies one downloaded batch to the application's tables and moves the cursor past it.
+     *
+     * Runs inside the caller's transaction, which is what ties the cursor to the batch.
+     *
+     * @param batch Batch to apply.
+     */
     private suspend fun apply(batch: StoredBatch) {
         val generation = stores.collections.ensure(scope, collection).generation
         val isOwnEcho = batch.originClientId != null && batch.originClientId == clientId
@@ -302,6 +309,12 @@ internal class PullCoordinator(
         stores.records.setConflict(scope, collection, op.entityType, op.entityId, conflictId)
     }
 
+    /**
+     * Decides what a failed read of the change log means for the collection.
+     *
+     * @param failure What the transport reported.
+     * @return What the cycle does next.
+     */
     private suspend fun handleFailure(failure: SyncTransportFailure): PullOutcome =
         when (failure) {
             is SyncTransportFailure.CursorTooOld -> {
@@ -322,7 +335,10 @@ internal class PullCoordinator(
                 PullOutcome.ResetRequired
             }
 
-            is SyncTransportFailure.Unauthorized, is SyncTransportFailure.Revoked -> {
+            is SyncTransportFailure.Unauthorized,
+            is SyncTransportFailure.UpgradeRequired,
+            is SyncTransportFailure.Revoked,
+            -> {
                 PullOutcome.Interrupted(failure)
             }
 
@@ -350,6 +366,11 @@ internal class PullCoordinator(
             else -> null
         }
 
+    /**
+     * Converts a batch from the wire into the form the inbox keeps.
+     *
+     * @return The batch as stored.
+     */
     private fun ChangeBatch.toStored(): StoredBatch =
         StoredBatch(
             seq = seq,

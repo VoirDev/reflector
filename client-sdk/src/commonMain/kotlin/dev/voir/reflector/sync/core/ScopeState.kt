@@ -49,6 +49,19 @@ public sealed class ScopeState {
     public data object AuthRequired : ScopeState()
 
     /**
+     * The server no longer accepts this version of the client.
+     *
+     * Workers stop instead of backing off, because no attempt from this build can succeed, and the
+     * event channel stops reconnecting. Local data and the push queue are preserved, so an updated
+     * application sends what this one could not. It outranks [Offline] and [ServerUnreachable] the
+     * way [AuthRequired] does: neither a lost connection nor its return says anything about it. The
+     * first push, log read or snapshot the server accepts returns the scope to [Online] — which, for
+     * a server that keeps refusing this build, happens only once the application has been updated
+     * and started again.
+     */
+    public data object UpgradeRequired : ScopeState()
+
+    /**
      * Access to the scope has been revoked.
      *
      * Terminal for this scope: there is nobody left to accept its queued changes, and the local

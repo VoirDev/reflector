@@ -495,6 +495,24 @@ class PushCoordinatorTest {
         }
 
     @Test
+    fun `a refused client version stops the push without touching the queue`() =
+        runTest {
+            adapter.bodies[wallet to entity(1)] = body("Cash")
+            mutations.mutate(scope, collection) { markUpserted(wallet, entity(1)) }
+            val groupId = groupIdOf(1)
+            transport.onPush = { throw SyncTransportFailure.UpgradeRequired("this client is too old") }
+
+            val outcome = coordinator().pushOnce()
+
+            assertIs<SyncTransportFailure.UpgradeRequired>(assertIs<PushOutcome.Interrupted>(outcome).failure)
+            val group = assertNotNull(stores.groups.find(groupId))
+            assertEquals(PushGroupState.PENDING, group.state)
+            assertEquals(0, group.attempts, "a refused version is not a failed attempt")
+            assertNull(group.nextRetryAt, "nothing is scheduled: no attempt from this build can succeed")
+            assertTrue(record(1).isDirty, "the change waits for the updated application")
+        }
+
+    @Test
     fun `a conflicted group at the head stops the ones behind it`() =
         runTest {
             adapter.bodies[wallet to entity(1)] = body("Cash")

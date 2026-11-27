@@ -324,6 +324,12 @@ internal class PushCoordinator(
         }
     }
 
+    /**
+     * Names the server's answer to a group in the terms the metrics report.
+     *
+     * @return Outcome to report; a refused dependency is told apart from any other refusal, because the
+     *   library answers it by merging rather than by blocking the queue.
+     */
     private fun PushGroupResult.toMetricOutcome(): PushMetricOutcome =
         when (this) {
             is PushGroupResult.Applied -> {
@@ -343,6 +349,11 @@ internal class PushCoordinator(
             }
         }
 
+    /**
+     * Finds the group at the head of the queue and decides whether it can be sent now.
+     *
+     * @return What to do with the head of the queue.
+     */
     private suspend fun prepare(): Preparation {
         val now = clock.now().toEpochMilliseconds()
         val head = headOfQueue() ?: return Preparation.Empty
@@ -506,6 +517,12 @@ internal class PushCoordinator(
         }
     }
 
+    /**
+     * Asks the application for the current body of an entity.
+     *
+     * @param record Entity whose body to read.
+     * @return The body, or `null` when the application no longer has the entity.
+     */
     private suspend fun snapshotOf(record: RecordState): JsonObject? =
         adapter.snapshot(record.entityType, record.entityId)
 
@@ -583,6 +600,13 @@ internal class PushCoordinator(
         }
     }
 
+    /**
+     * Checks a group against the limits the server published, before it is sent.
+     *
+     * @param ops Operations the group would carry.
+     * @param sent Bodies those operations would send, by entity.
+     * @return Why the group is too large, or `null` when it fits.
+     */
     private fun oversized(
         ops: List<PushOperation>,
         sent: Map<EntityKey, JsonObject?>,
@@ -601,6 +625,13 @@ internal class PushCoordinator(
         return null
     }
 
+    /**
+     * Applies the server's answer to a group that was sent.
+     *
+     * @param prepared Group that was sent, with what it carried.
+     * @param result What the server answered for it.
+     * @return What the queue does next.
+     */
     private suspend fun apply(
         prepared: Preparation.Ready,
         result: PushGroupResult,
@@ -741,6 +772,13 @@ internal class PushCoordinator(
         stores.groups.delete(groupId)
     }
 
+    /**
+     * Merges a group the server refused for a missing dependency into the group behind it.
+     *
+     * @param group Group the server refused.
+     * @param message Description the server gave.
+     * @return What the queue does next.
+     */
     private suspend fun mergeAfterDependency(
         group: PendingGroup,
         message: String,
@@ -822,6 +860,13 @@ internal class PushCoordinator(
         return PushOutcome.Applied
     }
 
+    /**
+     * Decides what a failed push means for the group that was sent.
+     *
+     * @param group Group that was sent.
+     * @param failure What the transport reported.
+     * @return What the queue does next.
+     */
     private suspend fun handleFailure(
         group: PendingGroup,
         failure: SyncTransportFailure,
@@ -838,9 +883,13 @@ internal class PushCoordinator(
                         PushOutcome.ResetRequired
                     }
 
-                    is SyncTransportFailure.Unauthorized, is SyncTransportFailure.Revoked -> {
-                        // The group goes back to the queue untouched: signing in again has to let it
-                        // leave, and its identifier stays valid because the envelope never changed.
+                    is SyncTransportFailure.Unauthorized,
+                    is SyncTransportFailure.UpgradeRequired,
+                    is SyncTransportFailure.Revoked,
+                    -> {
+                        // The group goes back to the queue untouched: signing in again, or the
+                        // updated application, has to let it leave, and its identifier stays valid
+                        // because the envelope never changed.
                         stores.groups.setState(group.groupId, PushGroupState.PENDING)
                         PushOutcome.Interrupted(failure)
                     }
@@ -908,6 +957,12 @@ internal class PushCoordinator(
         )
     }
 
+    /**
+     * When the next attempt may start, following the backoff.
+     *
+     * @param attempts Attempts made so far, this one included.
+     * @return Epoch milliseconds of the earliest next attempt.
+     */
     private fun retryAt(attempts: Int): Long =
         clock.now().toEpochMilliseconds() + backoff.nextDelay(attempts).inWholeMilliseconds
 

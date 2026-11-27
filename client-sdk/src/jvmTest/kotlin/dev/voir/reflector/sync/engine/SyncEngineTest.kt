@@ -60,6 +60,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.buildJsonObject
@@ -1217,6 +1219,113 @@ class SyncEngineTest {
             scope.resume()
 
             collection.state.await("the group sent as soon as the pause was lifted") { it.pendingCount == 0 }
+        }
+
+    @Test
+    fun `a server that refuses this client version stops the push and keeps the queue`() =
+        runBlocking<Unit> {
+            transport.onSnapshot = { emptySnapshot() }
+            transport.onPush = { throw SyncTransportFailure.UpgradeRequired("this client is too old") }
+            val scope = engine(workers).scope(scopeId)
+            val collection = scope.collection(ledger)
+            collection.state.await("a live collection") { it.phase == SyncPhase.LIVE }
+
+            collection.mutate {
+                adapter.bodies[wallet to walletId] = buildJsonObject { put("title", "Cash") }
+                markUpserted(wallet, walletId)
+            }
+
+            scope.state.awaitState("a scope whose client is refused", ScopeState.UpgradeRequired)
+            collection.state.await("the refusal reported") { it.lastFailure is SyncFailure.UpgradeRequired }
+            // Long enough for a backoff loop to have sent the group again, which it must not.
+            delay(SETTLE_MILLIS)
+            assertEquals(1, transport.pushes.size, "no attempt from this build can succeed, so none is repeated")
+            assertEquals(1, collection.state.value.pendingCount, "the change waits for the updated application")
+            val group = assertNotNull(stores.groups.head(scopeId, ledger))
+            assertEquals(PushGroupState.PENDING, group.state)
+            assertEquals(0, group.attempts)
+            assertNull(group.nextRetryAt)
+            assertEquals("this client is too old", collection.state.value.lastFailure?.message)
+        }
+
+    @Test
+    fun `a server that refuses this client version when reading the log stops the scope until it accepts it`() =
+        runBlocking<Unit> {
+            transport.onSnapshot = { emptySnapshot() }
+            val scope = engine(workers).scope(scopeId)
+            val collection = scope.collection(ledger)
+            collection.state.await("a live collection") { it.phase == SyncPhase.LIVE }
+
+            transport.onChanges = { throw SyncTransportFailure.UpgradeRequired("this client is too old") }
+            collection.requestSync()
+            scope.state.awaitState("a scope whose client is refused", ScopeState.UpgradeRequired)
+
+            // What the updated application, or a server that lowered its floor, looks like: the
+            // next cycle is answered, and the state follows it.
+            transport.onChanges = { ChangesPage(emptyList(), nextCursor = null, hasMore = false, epoch = TEST_EPOCH) }
+            collection.requestSync()
+            scope.state.awaitState("a scope whose client is accepted again", ScopeState.Online)
+        }
+
+    @Test
+    fun `a server that refuses this client version during a snapshot keeps the collection unfinished`() =
+        runBlocking<Unit> {
+            transport.onSnapshot = { throw SyncTransportFailure.UpgradeRequired("this client is too old") }
+            val scope = engine(workers).scope(scopeId)
+            val collection = scope.collection(ledger)
+
+            scope.state.awaitState("a scope whose client is refused", ScopeState.UpgradeRequired)
+            collection.state.await("the refusal reported") { it.lastFailure is SyncFailure.UpgradeRequired }
+            assertTrue(collection.state.value.phase != SyncPhase.LIVE)
+        }
+
+    @Test
+    fun `a server that refuses this client version on its limits is reported as such, not as an outage`() =
+        runBlocking<Unit> {
+            transport.limitsFailure = SyncTransportFailure.UpgradeRequired("this client is too old")
+            val scope = engine(workers).scope(scopeId)
+            val collection = scope.collection(ledger)
+
+            scope.state.awaitState("a scope whose client is refused", ScopeState.UpgradeRequired)
+            collection.state.await("the refusal reported") { it.lastFailure is SyncFailure.UpgradeRequired }
+            assertEquals(0, snapshots, "nothing is read before the server takes this build")
+        }
+
+    @Test
+    fun `the event channel is closed while the server refuses this client version`() =
+        runBlocking<Unit> {
+            val opened = AtomicInteger()
+            val closed = AtomicInteger()
+            val channel =
+                object : SyncEventChannel {
+                    override fun signals(scope: ScopeId) =
+                        flow<SyncChannelSignal> {
+                            opened.incrementAndGet()
+                            try {
+                                awaitCancellation()
+                            } finally {
+                                closed.incrementAndGet()
+                            }
+                        }
+                }
+            transport.onSnapshot = { emptySnapshot() }
+            val scope = engine(workers, eventChannel = channel).scope(scopeId)
+            val collection = scope.collection(ledger)
+            collection.state.await("a live collection") { it.phase == SyncPhase.LIVE }
+            assertNotNull(withTimeoutOrNull(AWAIT_TIMEOUT_MILLIS) { while (opened.get() < 1) delay(POLL_MILLIS) })
+
+            transport.onChanges = { throw SyncTransportFailure.UpgradeRequired("this client is too old") }
+            collection.requestSync()
+            scope.state.awaitState("a scope whose client is refused", ScopeState.UpgradeRequired)
+
+            val stopped = withTimeoutOrNull(AWAIT_TIMEOUT_MILLIS) { while (closed.get() < 1) delay(POLL_MILLIS) }
+            assertNotNull(stopped, "a socket the server refuses must not be reconnected for the rest of the process")
+
+            transport.onChanges = { ChangesPage(emptyList(), nextCursor = null, hasMore = false, epoch = TEST_EPOCH) }
+            collection.requestSync()
+            scope.state.awaitState("a scope whose client is accepted again", ScopeState.Online)
+            val reopened = withTimeoutOrNull(AWAIT_TIMEOUT_MILLIS) { while (opened.get() < 2) delay(POLL_MILLIS) }
+            assertNotNull(reopened, "the channel comes back once the server takes this build again")
         }
 
     private companion object {

@@ -19,8 +19,9 @@ import kotlin.time.Duration.Companion.seconds
  *
  * Shared by the two transports rather than written twice, because neither half of it is plumbing.
  * The refusal of credentials is retried exactly once and only after the application has renewed
- * them; the status codes are mapped into the closed set the engine reacts to, and `409`, `410` and
- * `429` are protocol answers whose recoveries would be lost if they became generic failures.
+ * them; the status codes are mapped into the closed set the engine reacts to, and `409`, `410`,
+ * `426` and `429` are protocol answers whose recoveries would be lost if they became generic
+ * failures.
  *
  * It is deliberately **not** used for a ticket. A presigned request goes to the host's storage,
  * which is a different server that must never see this scope's credentials.
@@ -117,6 +118,10 @@ internal class AuthorizedRequests(
                 throw SyncTransportFailure.Revoked("access to the scope has been revoked")
             }
 
+            response.status == HttpStatusCode.UpgradeRequired -> {
+                throw SyncTransportFailure.UpgradeRequired("the server no longer accepts this version of the client")
+            }
+
             response.status == HttpStatusCode.Conflict -> {
                 throw SyncTransportFailure.CollectionReset("the collection has been purged and started again")
             }
@@ -139,14 +144,23 @@ internal class AuthorizedRequests(
         }
     }
 
+    /**
+     * Reads how long the server asked the client to wait.
+     *
+     * @return The delay, or `null` when the server named none or named it as a date.
+     */
     private fun HttpResponse.retryAfter(): Duration? = headers[HttpHeaders.RetryAfter]?.toLongOrNull()?.seconds
 
     /**
      * Attaches the scope's credentials to a request bound for the synchronisation server.
      *
+     * Also marks it as bound there, which is what lets the client's default headers reach it — and
+     * only it: a presigned transfer is never authorised, so it never carries them either.
+     *
      * @param token Credential to present, or `null` when the application has none.
      */
     fun HttpRequestBuilder.authorize(token: String?) {
+        markForSyncServer()
         token?.let { header(HttpHeaders.Authorization, "Bearer $it") }
     }
 }

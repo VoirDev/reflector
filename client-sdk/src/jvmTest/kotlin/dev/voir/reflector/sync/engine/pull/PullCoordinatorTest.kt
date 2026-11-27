@@ -221,6 +221,21 @@ class PullCoordinatorTest {
         }
 
     @Test
+    fun `a refused client version interrupts the pull and leaves the cursor where it was`() =
+        runTest {
+            goLive()
+            val before = assertNotNull(stores.collections.find(scope, collection))
+            transport.onChanges = { throw SyncTransportFailure.UpgradeRequired("this client is too old") }
+
+            val outcome = coordinator.pull()
+
+            assertIs<SyncTransportFailure.UpgradeRequired>(assertIs<PullOutcome.Interrupted>(outcome).failure)
+            val after = assertNotNull(stores.collections.find(scope, collection))
+            assertEquals(before.cursor, after.cursor)
+            assertEquals(SyncPhase.LIVE, after.phase)
+        }
+
+    @Test
     fun `pages are drained until the server has nothing more`() =
         runTest {
             goLive()

@@ -405,6 +405,10 @@ internal class BlobWorker(
             // Collected while this device was away, or erased with its collection. A device that
             // never had the bytes cannot produce them; only the application can decide what to show.
             giveUp(record.blobId, BlobFailure.Gone(failure.message.orEmpty()))
+        } catch (failure: SyncTransportFailure.UpgradeRequired) {
+            // Never given up on: the file is there to be fetched, only not by this build, and giving
+            // up would leave the updated application a failed download instead of a pending one.
+            schedule(record, failure.message ?: "the server no longer accepts this version of the client")
         } catch (failure: SyncTransportFailure) {
             retryOrGiveUp(record, failure)
         }

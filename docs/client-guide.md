@@ -234,8 +234,21 @@ val channel = KtorSyncEventChannel(http, baseUrl, tokens)
 
 `syncHttpClient` is not a convenience: a client that drops nulls turns "clear this field" into
 "leave it alone" once the server merges the patch, and `expectSuccess = false` is required because
-`409`, `410` and `429` are part of the protocol rather than failures to throw — `409` in particular
-is how a client is told the collection it follows was purged.
+`409`, `410`, `426` and `429` are part of the protocol rather than failures to throw — `409` in
+particular is how a client is told the collection it follows was purged.
+
+Headers your host needs on every request — the build's version, so that it can refuse a build it no
+longer supports with `426` — go in `defaultHeaders`:
+
+```kotlin
+val http = syncHttpClient(engine, defaultHeaders = mapOf("X-Client-Version" to BuildConfig.VERSION_NAME))
+```
+
+They reach every request the transports send to the synchronisation server, the event channel's
+handshake included, and never a presigned file transfer: that goes to your storage, which signs
+over exactly the headers its ticket names. A header the library sets itself, such as
+`Authorization`, is never replaced by one of these. The header names are yours; the protocol
+defines none.
 
 It also pings the event channel's socket every 20 seconds and gives requests a 15-second connect
 timeout and a 30-second idle timeout, so a connection a mobile network dropped without closing is
@@ -334,15 +347,21 @@ data class CollectionSyncState(
     val phase: SyncPhase,          // NEW | BOOTSTRAPPING | LIVE | NEEDS_ATTENTION | RESYNC_REQUIRED
     val pendingCount: Int,
     val conflictCount: Int,
-    val lastFailure: SyncFailure?, // Network | Server | AuthRequired | Revoked | Rejected | Local
+    val lastFailure: SyncFailure?, // Network | Server | AuthRequired | UpgradeRequired | Revoked | Rejected | Local
 )
 ```
 
 `collection.state` is a `StateFlow`; `scope.state` carries `Online | Offline | ServerUnreachable |
-AuthRequired | Revoked`. `Offline` and `ServerUnreachable` end on their own: the first push, log
-read or snapshot the server answers puts the scope back to `Online`, and so does the event channel
-reconnecting. `AuthRequired` ends the same way once the user has signed in again and the server
-accepts the new token; `Revoked` is final. Between the two, a status line ("3 changes waiting", "sign in to sync", "1 conflict") is a
+AuthRequired | UpgradeRequired | Revoked`. `Offline` and `ServerUnreachable` end on their own: the
+first push, log read or snapshot the server answers puts the scope back to `Online`, and so does the
+event channel reconnecting. `AuthRequired` ends the same way once the user has signed in again and
+the server accepts the new token. `UpgradeRequired` means the server answered `426`: this build is
+no longer accepted. The workers stop without backing off, the event channel closes, and the queue
+and local data are kept for the updated application, which sends them on its first start; a later
+trigger asks once more, so a server that takes this build again returns the scope to `Online`.
+Neither a lost connection nor its return changes `AuthRequired` or `UpgradeRequired`. `Revoked` is
+final. Between the two, a status line ("3 changes waiting", "sign in to sync", "update to sync",
+"1 conflict") is a
 few lines of UI and no polling.
 
 When that status line says "3 changes waiting" and has been saying it for an hour, ask the

@@ -43,14 +43,17 @@ class KtorSyncTransportTest {
             }
         }
 
-    private fun transport(handler: suspend MockRequestHandleScope.(HttpRequestData) -> HttpResponseData) =
-        KtorSyncTransport(
+    private fun transport(
+        defaultHeaders: Map<String, String> = emptyMap(),
+        handler: suspend MockRequestHandleScope.(HttpRequestData) -> HttpResponseData,
+    ) = KtorSyncTransport(
             client =
                 syncHttpClient(
                     MockEngine { request ->
                         requests += request
                         handler(request)
                     },
+                    defaultHeaders = defaultHeaders,
                 ),
             baseUrl = "https://sync.example.com",
             tokens = tokenProvider,
@@ -135,6 +138,34 @@ class KtorSyncTransportTest {
             assertFailsWith<SyncTransportFailure.Revoked> {
                 transport.changes(scope, collection, cursor = null, limit = 10)
             }
+        }
+
+    @Test
+    fun `a refused client version is reported as such`() =
+        runTest {
+            val transport = transport { respondError(HttpStatusCode.UpgradeRequired) }
+
+            assertFailsWith<SyncTransportFailure.UpgradeRequired> {
+                transport.changes(scope, collection, cursor = null, limit = 10)
+            }
+            assertFailsWith<SyncTransportFailure.UpgradeRequired> { transport.limits() }
+            assertEquals(0, refreshes, "a refused version is not a refused credential")
+        }
+
+    @Test
+    fun `the application's headers reach every request to the server without replacing the library's own`() =
+        runTest {
+            val (headers, body) = json(emptyChanges())
+            val transport =
+                transport(
+                    defaultHeaders = mapOf("X-Client-Version" to "3.1.0", HttpHeaders.Authorization to "Bearer forged"),
+                ) { respond(body, HttpStatusCode.OK, headers) }
+
+            transport.changes(scope, collection, cursor = null, limit = 10)
+
+            val request = requests.single()
+            assertEquals("3.1.0", request.headers["X-Client-Version"])
+            assertEquals(listOf("Bearer first"), request.headers.getAll(HttpHeaders.Authorization))
         }
 
     @Test

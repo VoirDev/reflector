@@ -58,14 +58,17 @@ class KtorBlobTransportTest {
             override suspend fun refresh(): Boolean = false
         }
 
-    private fun transport(handler: suspend MockRequestHandleScope.(HttpRequestData) -> HttpResponseData) =
-        KtorBlobTransport(
+    private fun transport(
+        defaultHeaders: Map<String, String> = emptyMap(),
+        handler: suspend MockRequestHandleScope.(HttpRequestData) -> HttpResponseData,
+    ) = KtorBlobTransport(
             client =
                 syncHttpClient(
                     MockEngine { request ->
                         requests += request
                         handler(request)
                     },
+                    defaultHeaders = defaultHeaders,
                 ),
             baseUrl = "https://sync.example.com",
             tokens = tokenProvider,
@@ -153,6 +156,45 @@ class KtorBlobTransportTest {
                     .toString()
                     .endsWith("/v1/sync/user-1/ledger/blobs"),
             )
+        }
+
+    @Test
+    fun `the application's headers reach the server and never a presigned url`() =
+        runTest {
+            val transport =
+                transport(defaultHeaders = mapOf("X-Client-Version" to "3.1.0")) { request ->
+                    if (request.url.host == "bucket.example") {
+                        respond(BYTES, HttpStatusCode.OK)
+                    } else {
+                        respond(
+                            """{"blob":{"blobId":"${blobId.value}","state":"pending","contentType":"image/jpeg",""" +
+                                """"size":4,"checksum":null},"upload":null}""",
+                            HttpStatusCode.OK,
+                            headersOf(HttpHeaders.ContentType, "application/json"),
+                        )
+                    }
+                }
+
+            transport.register(scope, collection, BlobDescriptor(blobId, BlobContentType("image/jpeg"), size = 4))
+            transport.upload(ticket(BlobTicketMethod.PUT), Buffer().apply { write(BYTES) }, stat())
+            transport.download(ticket(BlobTicketMethod.GET), Buffer())
+
+            val (register, upload, download) = requests
+            assertEquals("3.1.0", register.headers["X-Client-Version"])
+            // Storage signs over exactly the headers its ticket named, and has no use for the
+            // application's anyway; they are for the synchronisation server alone.
+            assertNull(upload.headers["X-Client-Version"])
+            assertNull(download.headers["X-Client-Version"])
+        }
+
+    @Test
+    fun `a refused client version on a file registration is reported as such`() =
+        runTest {
+            val transport = transport { respondError(HttpStatusCode.UpgradeRequired) }
+
+            assertFailsWith<SyncTransportFailure.UpgradeRequired> {
+                transport.register(scope, collection, BlobDescriptor(blobId, BlobContentType("image/jpeg"), size = 4))
+            }
         }
 
     @Test

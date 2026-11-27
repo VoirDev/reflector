@@ -34,7 +34,10 @@ import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.getAndUpdate
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlin.time.Clock
 import kotlin.uuid.Uuid
@@ -234,25 +237,52 @@ internal class DefaultScopeHandle(
      * The channel carries no data, only the fact that there is data, so every signal ends in the
      * same place: waking the worker that owns the collection. A reconnect wakes all of them, because
      * notifications sent while the socket was down are gone and nothing later will mention them.
+     *
+     * Nobody listens while the server refuses this version of the client. The server refuses the
+     * socket's handshake as well, and the channel would otherwise reconnect for as long as the
+     * process lives, against a server that has already said no; collecting stops instead, which
+     * closes the socket and ends its reconnect loop. Should the server take this build again, the
+     * scope leaves that state and the channel is opened afresh.
+     *
+     * @param channel Channel to listen to.
      */
     private suspend fun listen(channel: SyncEventChannel) {
-        channel.signals(scopeId).collect { signal ->
-            when (signal) {
-                is SyncChannelSignal.Connected -> {
-                    // From either way of not having reached the server: the socket being up is
-                    // proof that both the device and the server are there.
-                    mutableState.compareAndSet(ScopeState.Offline, ScopeState.Online)
-                    mutableState.compareAndSet(ScopeState.ServerUnreachable, ScopeState.Online)
-                    workersByCollection.values.forEach { it.requestSync() }
+        mutableState
+            .map { it == ScopeState.UpgradeRequired }
+            .distinctUntilChanged()
+            .collectLatest { refused ->
+                if (!refused) {
+                    channel.signals(scopeId).collect { signal -> react(signal) }
                 }
+            }
+    }
 
-                is SyncChannelSignal.Received -> {
-                    handle(signal.event)
-                }
+    /**
+     * Wakes the workers a signal from the channel concerns.
+     *
+     * @param signal What the channel reported.
+     */
+    private suspend fun react(signal: SyncChannelSignal) {
+        when (signal) {
+            is SyncChannelSignal.Connected -> {
+                // From either way of not having reached the server: the socket being up is
+                // proof that both the device and the server are there.
+                mutableState.compareAndSet(ScopeState.Offline, ScopeState.Online)
+                mutableState.compareAndSet(ScopeState.ServerUnreachable, ScopeState.Online)
+                workersByCollection.values.forEach { it.requestSync() }
+            }
+
+            is SyncChannelSignal.Received -> {
+                handle(signal.event)
             }
         }
     }
 
+    /**
+     * Acts on one notification from the server.
+     *
+     * @param event What the server announced.
+     */
     private suspend fun handle(event: SyncEvent) {
         logger.debug(
             SyncLogEvent.CHANNEL_EVENT_RECEIVED,
@@ -297,6 +327,11 @@ internal class DefaultScopeHandle(
         }
     }
 
+    /**
+     * Names a scope state for a log line's context.
+     *
+     * @return The state's name.
+     */
     private fun ScopeState.describe(): String = this::class.simpleName.orEmpty()
 
     /**
@@ -324,6 +359,11 @@ internal class DefaultScopeHandle(
             ScopeState.AuthRequired -> {
                 "the credentials were refused and could not be renewed; the workers stop and the queue is kept " +
                     "until the user signs in again"
+            }
+
+            ScopeState.UpgradeRequired -> {
+                "the server no longer accepts this version of the client; the workers stop, the event channel " +
+                    "closes and the queue is kept for the updated application"
             }
 
             ScopeState.Revoked -> {

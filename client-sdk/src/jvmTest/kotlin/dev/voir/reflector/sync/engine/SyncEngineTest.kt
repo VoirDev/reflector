@@ -1233,6 +1233,11 @@ class SyncEngineTest {
             val scope = engine(workers).scope(scopeId)
             val collection = scope.collection(ledger)
             collection.state.await("a live collection") { it.phase == SyncPhase.LIVE }
+            // The collection is live once the bootstrap commits, while the first cycle still has its
+            // queue to drain. A change made then is pushed by that cycle and again by the cycle its
+            // own trigger starts — two triggers, two attempts — so the change waits for the first
+            // cycle to end, and only its own trigger can send it.
+            awaitRecords("the first cycle to finish") { cyclesFinished() >= 1 }
 
             collection.mutate {
                 adapter.bodies[wallet to walletId] = buildJsonObject { put("title", "Cash") }
